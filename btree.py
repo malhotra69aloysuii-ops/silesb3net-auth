@@ -90,7 +90,7 @@ class BraintreeAuthChecker:
         }
 
     def get_login_nonce(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get login nonce from my-account page with improved patterns"""
+        """Get login nonce from my-account page with exact pattern matching"""
         try:
             url = f"{self.base_url}/my-account/"
             response = self.session.get(url, headers=self.headers, timeout=10)
@@ -100,53 +100,38 @@ class BraintreeAuthChecker:
             if response.status_code != 200:
                 return None, f"Failed to load login page: {response.status_code}"
             
-            # Enhanced nonce extraction patterns
+            # Exact pattern based on the HTML structure we saw
             patterns = [
-                # Standard WooCommerce pattern
+                # Exact pattern from the HTML sample
+                r'<input type="hidden" id="woocommerce-login-nonce" name="woocommerce-login-nonce" value="([^"]+)"',
+                # Alternative patterns
                 r'name="woocommerce-login-nonce" value="([^"]+)"',
-                # Alternative pattern with different quotes
                 r"name='woocommerce-login-nonce' value='([^']+)'",
-                # Pattern with ID
                 r'id="woocommerce-login-nonce"[^>]*value="([^"]+)"',
-                # Generic pattern for any nonce field
-                r'woocommerce-login-nonce["\'\s][^>]*value=["\']?([^"\'\s>]+)',
-                # Pattern that looks for any input with nonce in name
-                r'<input[^>]*name="[^"]*login[^"]*nonce[^"]*"[^>]*value="([^"]+)"',
-                # Very broad pattern for any nonce-like field
-                r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"',
             ]
             
             for i, pattern in enumerate(patterns):
-                nonce_match = re.search(pattern, response.text, re.IGNORECASE)
+                nonce_match = re.search(pattern, response.text)
                 if nonce_match:
                     nonce = nonce_match.group(1)
                     logger.info(f"✅ Found login nonce with pattern {i}: {nonce}")
                     return nonce, None
             
-            # Debug: log what we found for troubleshooting
-            all_nonces = re.findall(r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text, re.IGNORECASE)
-            if all_nonces:
-                logger.info(f"Found potential nonces: {all_nonces}")
-                return all_nonces[0], None
+            # If still not found, do a more comprehensive search
+            logger.info("Trying comprehensive search for nonce...")
             
-            # Last resort: look for any hidden input fields
-            hidden_inputs = re.findall(r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]+)"', response.text)
-            if hidden_inputs:
-                logger.info(f"Found hidden inputs: {[(name, value[:20] + '...' if len(value) > 20 else value) for name, value in hidden_inputs]}")
-                # Look for any field that might be a nonce
-                for name, value in hidden_inputs:
-                    if 'nonce' in name.lower() or len(value) > 20:  # Nonces are typically long strings
-                        logger.info(f"Selected nonce candidate: {name} = {value[:20]}...")
-                        return value, None
+            # Search for any input with woocommerce-login-nonce
+            all_inputs = re.findall(r'<input[^>]*>', response.text)
+            for inp in all_inputs:
+                if 'woocommerce-login-nonce' in inp:
+                    logger.info(f"Found potential nonce input: {inp}")
+                    value_match = re.search(r'value="([^"]+)"', inp)
+                    if value_match:
+                        nonce = value_match.group(1)
+                        logger.info(f"Extracted nonce from input: {nonce}")
+                        return nonce, None
             
             logger.error("❌ Could not find login nonce with any pattern")
-            # Log a small sample of the response for debugging
-            sample_start = response.text[:500]
-            sample_end = response.text[-500:] if len(response.text) > 1000 else ""
-            logger.info(f"Response sample (start): {sample_start}")
-            if sample_end:
-                logger.info(f"Response sample (end): {sample_end}")
-            
             return None, "Could not find login nonce"
             
         except Exception as e:
