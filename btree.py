@@ -90,7 +90,7 @@ class BraintreeAuthChecker:
         }
 
     def get_login_nonce(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get login nonce from my-account page"""
+        """Get login nonce from my-account page with improved patterns"""
         try:
             url = f"{self.base_url}/my-account/"
             response = self.session.get(url, headers=self.headers, timeout=10)
@@ -100,19 +100,54 @@ class BraintreeAuthChecker:
             if response.status_code != 200:
                 return None, f"Failed to load login page: {response.status_code}"
             
-            # Extract login nonce
-            nonce_match = re.search(r'name="woocommerce-login-nonce" value="(.*?)"', response.text)
-            if not nonce_match:
-                # Try alternative pattern
-                nonce_match = re.search(r'woocommerce-login-nonce["\']?[^>]*value=["\']?([^"\'>]+)', response.text)
+            # Enhanced nonce extraction patterns
+            patterns = [
+                # Standard WooCommerce pattern
+                r'name="woocommerce-login-nonce" value="([^"]+)"',
+                # Alternative pattern with different quotes
+                r"name='woocommerce-login-nonce' value='([^']+)'",
+                # Pattern with ID
+                r'id="woocommerce-login-nonce"[^>]*value="([^"]+)"',
+                # Generic pattern for any nonce field
+                r'woocommerce-login-nonce["\'\s][^>]*value=["\']?([^"\'\s>]+)',
+                # Pattern that looks for any input with nonce in name
+                r'<input[^>]*name="[^"]*login[^"]*nonce[^"]*"[^>]*value="([^"]+)"',
+                # Very broad pattern for any nonce-like field
+                r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"',
+            ]
             
-            if not nonce_match:
-                logger.error("Could not find login nonce in response")
-                return None, "Could not find login nonce"
+            for i, pattern in enumerate(patterns):
+                nonce_match = re.search(pattern, response.text, re.IGNORECASE)
+                if nonce_match:
+                    nonce = nonce_match.group(1)
+                    logger.info(f"✅ Found login nonce with pattern {i}: {nonce}")
+                    return nonce, None
             
-            nonce = nonce_match.group(1)
-            logger.info(f"Found login nonce: {nonce}")
-            return nonce, None
+            # Debug: log what we found for troubleshooting
+            all_nonces = re.findall(r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text, re.IGNORECASE)
+            if all_nonces:
+                logger.info(f"Found potential nonces: {all_nonces}")
+                return all_nonces[0], None
+            
+            # Last resort: look for any hidden input fields
+            hidden_inputs = re.findall(r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]+)"', response.text)
+            if hidden_inputs:
+                logger.info(f"Found hidden inputs: {[(name, value[:20] + '...' if len(value) > 20 else value) for name, value in hidden_inputs]}")
+                # Look for any field that might be a nonce
+                for name, value in hidden_inputs:
+                    if 'nonce' in name.lower() or len(value) > 20:  # Nonces are typically long strings
+                        logger.info(f"Selected nonce candidate: {name} = {value[:20]}...")
+                        return value, None
+            
+            logger.error("❌ Could not find login nonce with any pattern")
+            # Log a small sample of the response for debugging
+            sample_start = response.text[:500]
+            sample_end = response.text[-500:] if len(response.text) > 1000 else ""
+            logger.info(f"Response sample (start): {sample_start}")
+            if sample_end:
+                logger.info(f"Response sample (end): {sample_end}")
+            
+            return None, "Could not find login nonce"
             
         except Exception as e:
             logger.error(f"Error getting login nonce: {str(e)}")
@@ -124,7 +159,8 @@ class BraintreeAuthChecker:
             r'woocommerce-MyAccount-navigation',
             r'Log out',
             r'My Account',
-            r'Dashboard'
+            r'Dashboard',
+            r'Welcome.*popalako09',  # Check for username in welcome message
         ]
         return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
 
