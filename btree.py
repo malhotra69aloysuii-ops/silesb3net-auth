@@ -17,7 +17,7 @@ class BraintreeAuthChecker:
     def __init__(self):
         self.session = requests.Session()
         self.base_url = "https://precisionpowdertx.com"
-        self.braintree_auth_token = "eyJraWQiOiIyMDE4MDQyNjE2LXByb2R1Y3Rpb24iLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsImFsZyI6IkVTMjU2In0.eyJleHAiOjE3NjQ0MTUxODMsImp0aSI6IjUzZGFmY2EwLTg5YjMtNDY0Yy05MGYyLWU5YWM5MWJjMTQzNSIsInN1YiI6ImZzazZrdGd4ZjhoenBkdzQiLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsIm1lcmNoYW50Ijp7InB1YmxpY19pZCI6ImZzazZrdGd4ZjhoenBkdzQiLCJ2ZXJpZnlfY2FyZF9ieV9kZWZhdWx0IjpmYWxzZSwidmVyaWZ5X3dhbGxldF9ieV9kZWZhdWx0IjpmYWxzZX0sInJpZ2h0cyI6WyJtYW5hZ2VfdmF1bHQiXSwic2NvcGUiOlsiQnJhaW50cmVlOlZhdWx0IiwiQnJhaW50cmVlOkNsaWVudFNESyIsIkJyYWludHJlZTpBWE8iXSwib3B0aW9ucyI6eyJwYXlwYWxfY2xpZW50X2lkIjoiQVNkMHE2aVBQZXpGRnRNWUtydWNRUUcxVFZLdGh0bVhTVm5Eemtta0JwWjJraWJSRVVJZUpIOEJFd3hobjgzQklVeEJ5eU16TWhxWjk0ajcifX0.4j-mg5KvlOdklmqqWvpEdVLUQazQtWctYZ5HAPdkIm4oUbPtrkFn89oVyR7RmNPczBY-o-L1u4lpWBlLtzQVug"
+        self.braintree_auth_token = "eyJraWQiOiIyMDE4MDQyNjE2LXByb2R1Y3Rpb24iLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsImFsZyI6IkVTMjU2In0.eyJleHAiOjE3NjQ0MTUxODMsImp0aSI6IjUzZGFmY2EwLTg5YjMtNDY0Yy05MGYyLWU5YWM5MWJjMTQzNSIsInN1YiI6ImZzazZrdGd4ZjhoenBkdzQiLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsIm1lcmNoYW50Ijp7InB1YmxpY19pZCI6ImZzazZrdGd4ZjhoenBkdzQiLCJ2ZXJpZnlfY2FyZF9ieV9kZWZhdWx0IjpmYWxzZSwidmVyaWZ5X3dhbGxldF9ieV9kZWZhdWx0IjpmYWxzZX0sInJpZ2h0cyI6WyJtYW5hZ2VfdmF1bHQiXWSic2NvcGUiOlsiQnJhaW50cmVlOlZhdWx0IiwiQnJhaW50cmVlOkNsaWVudFNESyIsIkJyYWludHJlZTpBWE8iXSwib3B0aW9ucyI6eyJwYXlwYWxfY2xpZW50X2lkIjoiQVNkMHE2aVBQZXpGRnRNWUtydWNRUUcxVFZLdGh0bVhTVm5Eemtta0JwWjJraWJSRVVJZUpIOEJFd3hobjgzQklVeEJ5eU16TWhxWjk0ajcifX0.4j-mg5KvlOdklmqqWvpEdVLUQazQtWctYZ5HAPdkIm4oUbPtrkFn89oVyR7RmNPczBY-o-L1u4lpWBlLtzQVug"
         
         # Common headers
         self.headers = {
@@ -122,11 +122,27 @@ class BraintreeAuthChecker:
         """Check if login was successful"""
         patterns = [
             r'woocommerce-MyAccount-navigation',
-            r'Log out',
-            r'My Account',
-            r'Dashboard'
+            r'Log out</a>',
+            r'Logout</a>',
+            r'Sign out</a>',
+            r'My Account</h2>',
+            r'Dashboard</h2>',
+            r'Welcome.*popalako09',  # Check for username in welcome message
+            r'woocommerce-MyAccount-content'
         ]
-        return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
+        
+        # Also check for elements that indicate NOT logged in
+        not_logged_in_patterns = [
+            r'Please log in',
+            r'Create an account',
+            r'Lost your password'
+        ]
+        
+        has_logged_in = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
+        has_not_logged_in = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in not_logged_in_patterns)
+        
+        logger.info(f"Login check - logged in patterns: {has_logged_in}, not logged in patterns: {has_not_logged_in}")
+        return has_logged_in and not has_not_logged_in
 
     def login(self) -> bool:
         """Login to the account"""
@@ -191,25 +207,54 @@ class BraintreeAuthChecker:
             response = self.session.get(url, headers=self.headers, timeout=10)
             
             logger.info(f"Payment page status: {response.status_code}")
+            logger.info(f"Payment page URL: {response.url}")
             
             if response.status_code != 200:
                 return None, f"Failed to load payment page: {response.status_code}"
             
-            # Try multiple patterns to find payment nonce
+            # Debug the page content
+            logger.info(f"Response length: {len(response.text)}")
+            logger.info(f"Page contains 'woocommerce-add-payment-method-nonce': {'woocommerce-add-payment-method-nonce' in response.text}")
+            
+            # Try multiple patterns to find payment nonce - updated patterns
             patterns = [
-                r'name="woocommerce-add-payment-method-nonce" value="(.*?)"',
-                r'woocommerce-add-payment-method-nonce["\']?[^>]*value=["\']?([^"\'>]+)',
-                r'id="woocommerce-add-payment-method-nonce"[^>]*value="(.*?)"'
+                r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
+                r'id="woocommerce-add-payment-method-nonce" name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
+                r'woocommerce-add-payment-method-nonce["\'\s][^>]*value=["\']?([^"\'\s>]+)',
+                r'<input[^>]*name="woocommerce-add-payment-method-nonce"[^>]*value="([^"]+)"',
+                r'<input[^>]*id="woocommerce-add-payment-method-nonce"[^>]*value="([^"]+)"'
             ]
             
-            for pattern in patterns:
-                nonce_match = re.search(pattern, response.text, re.DOTALL)
+            for i, pattern in enumerate(patterns):
+                nonce_match = re.search(pattern, response.text)
                 if nonce_match:
                     nonce = nonce_match.group(1)
-                    logger.info(f"Found payment nonce: {nonce}")
+                    logger.info(f"✅ Found payment nonce with pattern {i}: {nonce}")
                     return nonce, None
             
-            logger.error("Could not find payment nonce with any pattern")
+            # If no pattern matches, try to find any hidden input with nonce in name
+            hidden_inputs = re.findall(r'<input[^>]*type="hidden"[^>]*name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text)
+            if hidden_inputs:
+                logger.info(f"Found hidden nonce inputs: {hidden_inputs}")
+                return hidden_inputs[0], None
+            
+            # Last resort: search for any nonce-like values
+            all_nonces = re.findall(r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text)
+            if all_nonces:
+                logger.info(f"Found all nonces: {all_nonces}")
+                return all_nonces[0], None
+            
+            # Debug: Check if we're actually on the right page
+            if "add-payment-method" not in response.url:
+                return None, f"Not on payment method page. Redirected to: {response.url}"
+            
+            # Check if we're logged in
+            if not self.is_logged_in(response.text):
+                return None, "Not logged in when accessing payment page"
+            
+            logger.error("❌ Could not find payment nonce with any pattern")
+            # Log a sample of the page to see what's there
+            logger.info(f"Sample of response text (first 1000 chars): {response.text[:1000]}")
             return None, "Could not find payment nonce"
             
         except Exception as e:
