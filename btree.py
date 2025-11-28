@@ -122,27 +122,11 @@ class BraintreeAuthChecker:
         """Check if login was successful"""
         patterns = [
             r'woocommerce-MyAccount-navigation',
-            r'Log out</a>',
-            r'Logout</a>',
-            r'Sign out</a>',
-            r'My Account</h2>',
-            r'Dashboard</h2>',
-            r'Welcome.*popalako09',  # Check for username in welcome message
-            r'woocommerce-MyAccount-content'
+            r'Log out',
+            r'My Account',
+            r'Dashboard'
         ]
-        
-        # Also check for elements that indicate NOT logged in
-        not_logged_in_patterns = [
-            r'Please log in',
-            r'Create an account',
-            r'Lost your password'
-        ]
-        
-        has_logged_in = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
-        has_not_logged_in = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in not_logged_in_patterns)
-        
-        logger.info(f"Login check - logged in patterns: {has_logged_in}, not logged in patterns: {has_not_logged_in}")
-        return has_logged_in and not has_not_logged_in
+        return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
 
     def login(self) -> bool:
         """Login to the account"""
