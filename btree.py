@@ -308,6 +308,55 @@ class BraintreeAuthChecker:
             logger.error(f"Tokenization error: {str(e)}")
             return None, f"Tokenization error: {str(e)}"
 
+    def extract_response_message(self, html_content: str) -> str:
+        """Extract response message from HTML content with improved parsing"""
+        try:
+            # First try to extract from woocommerce-error (failure case)
+            error_patterns = [
+                r'<ul class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'<div class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'woocommerce-error[^>]*>.*?<li>\s*(.*?)\s*</li>',
+            ]
+            
+            for pattern in error_patterns:
+                error_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                if error_match:
+                    message = error_match.group(1).strip()
+                    # Clean up the message - remove extra HTML tags if any
+                    message = re.sub(r'<[^>]*>', '', message)
+                    logger.info(f"Extracted error message: {message}")
+                    return message
+            
+            # Then try to extract from woocommerce-message (success case)
+            success_patterns = [
+                r'<ul class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'<div class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
+                r'woocommerce-message[^>]*>.*?<li>\s*(.*?)\s*</li>',
+            ]
+            
+            for pattern in success_patterns:
+                success_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                if success_match:
+                    message = success_match.group(1).strip()
+                    # Clean up the message - remove extra HTML tags if any
+                    message = re.sub(r'<[^>]*>', '', message)
+                    logger.info(f"Extracted success message: {message}")
+                    return message
+            
+            # If no specific message found, check for generic indicators
+            if "woocommerce-error" in html_content:
+                return "Payment method addition failed (generic error)"
+            elif "woocommerce-message" in html_content:
+                return "Payment method added successfully"
+            else:
+                return "Unknown response from payment gateway"
+                
+        except Exception as e:
+            logger.error(f"Error extracting response message: {str(e)}")
+            return "Error parsing response message"
+
     def add_payment_method(self, token: str, payment_nonce: str) -> Tuple[Optional[str], Optional[str]]:
         """Add payment method to account"""
         try:
@@ -343,41 +392,32 @@ class BraintreeAuthChecker:
             )
             
             logger.info(f"Payment method response status: {response.status_code}")
+            logger.info(f"Payment method response URL: {response.url}")
             
-            # Extract response message
-            error_match = re.search(r'<ul class="woocommerce-error"[^>]*>.*?<li>(.*?)</li>', response.text, re.DOTALL)
-            if error_match:
-                message = error_match.group(1).strip()
-                logger.info(f"Payment error: {message}")
-                return message, None
-            else:
-                # Check for success
-                success_match = re.search(r'woocommerce-message', response.text)
-                if success_match:
-                    message = "Payment method added successfully"
-                    logger.info(message)
-                    return message, None
-                else:
-                    message = "Unknown response from payment method"
-                    logger.warning(message)
-                    return message, None
+            # Extract response message using improved parser
+            response_message = self.extract_response_message(response.text)
+            logger.info(f"Extracted response message: {response_message}")
+            
+            return response_message, None
                     
         except Exception as e:
             logger.error(f"Payment method error: {str(e)}")
             return None, f"Payment method error: {str(e)}"
 
     def categorize_response(self, response_msg: str) -> str:
-        """Categorize Braintree response"""
+        """Categorize Braintree response with improved keyword matching"""
         response = response_msg.lower()
 
         approved_keywords = [
             "approved", "approved. check customer id", "processed", 
             "approved with risk", "approved for partial amount",
-            "auth declined but settlement captured", "payment method added successfully"
+            "auth declined but settlement captured", "payment method added successfully",
+            "success", "successful"
         ]
         
         insufficient_keywords = [
-            "insufficient funds", "limit exceeded", "cardholder's activity limit exceeded"
+            "insufficient funds", "limit exceeded", "cardholder's activity limit exceeded",
+            "exceeds withdrawal", "over limit"
         ]
         
         ccn_cvv_keywords = [
@@ -385,13 +425,14 @@ class BraintreeAuthChecker:
             "card issuer declined cvv", "incorrect pin", "pin try exceeded", "invalid cvc",
             "invalid cvv", "security code", "address verification failed",
             "address verification and card security code failed",
-            "credit card number does not match method of payment"
+            "credit card number does not match method of payment",
+            "cvv", "security code", "verification code", "invalid number"
         ]
 
         live_keywords = [
             "cardholder authentication required", "additional authorization required",
             "3d secure", "mastercard securecode", "voice authorization required",
-            "declined– call for approval"
+            "declined– call for approval", "authentication required"
         ]
 
         declined_keywords = [
@@ -403,7 +444,8 @@ class BraintreeAuthChecker:
             "card reported as lost or stolen", "closed card", "settlement declined",
             "processor declined", "declined– updated cardholder available",
             "error– do not retry, call issuer", "declined– call issuer",
-            "invalid transaction data", "card not activated", "invalid credit card number"
+            "invalid transaction data", "card not activated", "invalid credit card number",
+            "not authorized", "cannot be processed", "transaction declined"
         ]
 
         setup_error_keywords = [
@@ -417,7 +459,8 @@ class BraintreeAuthChecker:
             "transaction amount exceeds the transaction division limit",
             "merchant not mastercard securecode enabled", "invalid tax amount",
             "invalid secure payment data", "invalid user credentials", "surcharge not permitted",
-            "inconsistent data", "verifications are not supported on this merchant account"
+            "inconsistent data", "verifications are not supported on this merchant account",
+            "91730", "not supported", "merchant account", "setup error"
         ]
 
         if any(kw in response for kw in approved_keywords):
