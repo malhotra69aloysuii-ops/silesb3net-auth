@@ -546,7 +546,7 @@ def home():
             '/onedollar': 'Process card charge (GET/POST)',
             '/health': 'Health check endpoint'
         },
-        'usage': 'GET /onedollar?chg=4777920800183271|03|29|752'
+        'usage': 'GET /onedollar?chg=ccn|mm|yy|cvv'
     })
 
 @app.route('/health')
